@@ -1,0 +1,59 @@
+"""Smoke test for the supplementary Poisson and biharmonic cube examples.
+
+This script is intended for quick validation of a clean checkout before the
+repository is distributed with the paper.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+from run_demo import run_suite
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--resolution", type=int, default=10, help="Cube resolution used for the smoke test")
+    parser.add_argument("--output", type=Path, default=None, help="Optional JSON file for the test summary")
+    args = parser.parse_args()
+
+    summary = run_suite(resolution=args.resolution, verbose=False)
+
+    failed = []
+    for name, result in summary["problems"].items():
+        if not result["converged"]:
+            failed.append(f"{name}: solver did not converge")
+        if result["timed_out"]:
+            failed.append(f"{name}: solver timed out")
+        if result["relative_residual"] > max(10.0 * result["tolerance"], 1e-10):
+            failed.append(
+                f"{name}: relative residual {result['relative_residual']:.3e} exceeds threshold"
+            )
+        if result["relative_error"] > 1e-4:
+            failed.append(
+                f"{name}: relative error {result['relative_error']:.3e} exceeds threshold"
+            )
+
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(summary, indent=2))
+
+    if failed:
+        print("Supplement smoke test FAILED")
+        for item in failed:
+            print(f"  - {item}")
+        return 1
+
+    print("Supplement smoke test PASSED")
+    for name, result in summary["problems"].items():
+        print(
+            f"  {name}: cycles={result['num_cycles']}, rel_res={result['relative_residual']:.3e}, "
+            f"rel_err={result['relative_error']:.3e}"
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
