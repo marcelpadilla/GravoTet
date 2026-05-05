@@ -97,19 +97,10 @@ namespace GravoMG {
 
 
 		
-		// Build the hierarchy using GravoMG surface-first sampling strategy
+		// Build the supplementary hierarchy using the Ours construction.
 		// - input_mesh:	TetrahedralMesh containing both vertices and connectivity
 		// - output_dir:    Directory for output files (optional override)
 		void constructProlongationOurs(const TetrahedralMesh& input_mesh, const std::string& output_dir_arg = "");
-
-        // Build the hierarchy using Shi06 algebraic multigrid method
-        // - input_mesh:	TetrahedralMesh containing both vertices and connectivity
-        // - output_dir:    Directory for output files (optional override)
-        void constructProlongationShi06(const TetrahedralMesh& input_mesh, const std::string& output_dir_arg = "");
-
-        // Build the hierarchy using "OurShi" method (Shi06 with feature-sorted pre-ordering)
-        // - input_mesh:	TetrahedralMesh containing both vertices and connectivity
-        void constructProlongationOurShi(const TetrahedralMesh& input_mesh);
 		
 		// Clear all hierarchy data (reset the solver)
 		void clearHierarchy();
@@ -126,13 +117,11 @@ namespace GravoMG {
 		// Check if hierarchy has been built
 		bool isHierarchyBuilt() const { return !all_vertices.empty(); }
 
-        // Compute Galerkin coarse operators (R * A * P) for all levels
+		// Compute Galerkin coarse operators (R * A * P) for all levels.
 		// Takes the fine level matrix A (level 0) and returns the list of coarse matrices.
-        // Returns a vector where result[i] is the operator for level i+1.
-		// Uses 'allP' if method="ours" (default) or 'allP_shi06' if method="shi06".
+		// Returns a vector where result[i] is the operator for level i+1.
         std::vector<Eigen::SparseMatrix<double>> computeCoarseOperators(
-            const Eigen::SparseMatrix<double>& A_fine,
-            const std::string& method = "ours"
+			const Eigen::SparseMatrix<double>& A_fine
         );
 
 		// Compute RAP product (R * A * P) using optimized parallel implementation
@@ -208,14 +197,10 @@ namespace GravoMG {
         // Build V-cycle hierarchy (operators and factorize coarse solver)
         // Must be called before solveVCycle
         // Returns true if hierarchy was successfully built
-        bool buildVCycleHierarchy(
-            const Eigen::SparseMatrix<double>& A_fine,
-            const std::string& method = "ours"
-        );
+		bool buildVCycleHierarchy(const Eigen::SparseMatrix<double>& A_fine);
         
-        // Set external prolongation operators for the V-cycle solver
-        // This allows Python to pass in arbitrary P matrices (e.g., from AMG, ours_virt)
-        // When set, buildVCycleHierarchy will use these instead of internal allP/allP_shi06
+		// Set external prolongation operators for the V-cycle solver.
+		// When set, buildVCycleHierarchy will use these instead of the internal hierarchy.
         void setExternalProlongations(
             const std::vector<Eigen::SparseMatrix<double>>& prolongations
         );
@@ -253,12 +238,8 @@ namespace GravoMG {
 		int maxLevels = 100;					// Maximum number of hierarchy levels (safety limit)
 		int directSolveThreshold = 12000;		// Vertex count below which direct solving is efficient (from scaling tests)
 		double searchRadiusFactor = 2.0;		// Search radius factor for sampling (sampling radius = cbrt(factor) * avg_edge_length)
-		double ratio_shi06 = 5.0;				// Coarsening ratio for Shi06 method (original paper uses 5.0)
 		bool verbose = true;					// Print progress information
-		bool featurePreserve = true;			// If true, sort by sharpness. If false, simple surface-first.
-		int maxProlongationElements = 4;        // For ours_shi: max non-zeros per row in prolongation matrix
-		std::string method = "ours_base";	// Sampling method: "ours_base" (default), "ours_surf", "ours_feat", "ours_pro", "ours_pro2", "ours_bshi"
-		int smoothInteriorIterations = 1;	// ours_pro2: 1=centroid only, 2+=centroid + (N-1) Laplacian passes
+		bool featurePreserve = true;			// Preserve sharp boundary features during coarsening.
 		std::string outputDir = "";				// Output directory for timing JSON files (empty = current dir)
 		bool use_dense_coarse_solver_ = false;  // Use dense LDLT for coarsest level (faster for small systems)
 
@@ -278,9 +259,6 @@ namespace GravoMG {
 		std::vector<Eigen::MatrixXi> all_tetrahedra;							// Tetrahedra per level (from input or simplicial complex build)
 		std::vector<std::vector<int>> boundary_indices;						// Boundary vertex indices per level
 		std::vector<Eigen::SparseMatrix<double>> allP;						// Prolongation operators (P[i] maps level i+1 to level i)
-		std::vector<Eigen::SparseMatrix<double>> allP_shi06;				// Prolongation operators for Shi06 method (P[i] maps level i+1 to level i)
-		std::vector<Eigen::MatrixXd> all_vertices_shi06;					// Vertex positions per level for Shi06 method
-		std::vector<Eigen::MatrixXi> allNeigh_shi06;						// Neighborhood matrices per level for Shi06 method
 		std::vector<Eigen::MatrixXi> allNeigh;								// Neighborhood matrices per level
 		
 		// --- Clustering Data (needed for restriction/prolongation) ---
@@ -319,7 +297,7 @@ namespace GravoMG {
 			std::vector<double> level_exterior_detect_ms;
 			std::vector<double> level_sort_feature_ms;
 			std::vector<double> level_coarse_graph_ms;       // Includes Dijkstra clustering + coarse graph build + vertex neighbours
-			std::vector<double> level_smooth_interior_ms;     // Interior Voronoi centroid shift (ours_pro2 only)
+			std::vector<double> level_smooth_interior_ms;     // Reserved slot for supplementary timing compatibility
 			std::vector<double> level_simplicial_complex_ms;
 			std::vector<double> level_interpolation_ms;
 			std::vector<double> level_total_ms;
@@ -415,7 +393,7 @@ namespace GravoMG {
 			Eigen::MatrixXi& coarseNeigh
 		);
 
-		// Two-phase coarse graph builder for ours_pro method (exterior-first).
+		// Two-phase coarse graph builder for the supplementary Ours method.
 		// Phase 1: Cluster exterior vertices using exterior-only connectivity
 		//          (from allExteriorNeigh[0]) and build exterior-only coarse graph.
 		// Phase 2: Cluster interior vertices via full volume graph, then merge
@@ -513,30 +491,6 @@ namespace GravoMG {
 		// Sort exterior indices by feature value (descending) for a specific level
 		void sortExteriorIndicesByFeature(int level);
 		
-		// Smooth coarse interior vertices by shifting them to their Voronoi cell centroids.
-		// Inspired by GravoMG surface paper ("Reducing single-entry rows"): moves each
-		// interior sampled point to the mean of the fine points in its graph Voronoi cell.
-		// Only interior vertices (index >= numCoarseExterior) are shifted; boundary
-		// vertices remain at their original sampled positions.
-		// @param coarseVertices     In/Out: coarse vertex positions to smooth
-		// @param sampleIndices      Coarse-to-fine index mapping
-		// @param nearestSource      Fine-to-coarse cluster assignment (Voronoi cells)
-		// @param fineVertices       Fine vertex positions
-		// @param numCoarseExterior  Number of exterior coarse vertices (indices [0..N-1])
-		// @param iterations         1=centroid only, 2+=centroid + (N-1) Laplacian passes
-		// @param coarseAdjList      Coarse graph adjacency list (needed for Laplacian passes)
-		void smoothCoarseInteriorVertices(
-			Eigen::MatrixXd& coarseVertices,
-			const std::vector<int>& sampleIndices,
-			const std::vector<size_t>& nearestSource,
-			const Eigen::MatrixXd& fineVertices,
-			int numCoarseExterior,
-			int iterations,
-			const std::vector<std::vector<int>>& coarseAdjList
-		);
-		
-
-
 		// Build neighborhood matrix from tetrahedra connectOptional: indices to sample first first (if provided) and then the rest.
         // If Exterior_indices is empty, it behaves like a standard linear scan.
         // - pos:                       All vertex positions
@@ -568,13 +522,6 @@ namespace GravoMG {
             const std::vector<std::vector<int>>& connectedTets,
             const std::vector<std::vector<int>>& tris,
             const std::vector<std::vector<int>>& connectedTris
-        );
-
-        // Maximum delta independent set sampling for Shi06
-        std::vector<int> maximumDeltaIndependentSet(
-            const Eigen::MatrixXd& pos, 
-            const Eigen::MatrixXi& edges, 
-            const double& radius
         );
 
 		// Test prolongation matrix properties
@@ -632,9 +579,6 @@ namespace GravoMG {
 		);
 
 	private:
-        // Helper to build Shi06 hierarchy starting from a given mesh (level 0)
-        void buildShi06Hierarchy(const TetrahedralMesh& mesh0);
-        
         // ========================================================================
         // V-CYCLE SOLVER PRIVATE MEMBERS
         // ========================================================================
@@ -666,7 +610,7 @@ namespace GravoMG {
         bool vcycle_hierarchy_built_ = false;
         int vcycle_num_levels_ = 0;
         
-        // External prolongation support
+		// External prolongation support
         bool use_external_prolongations_ = false;
         std::vector<Eigen::SparseMatrix<double>> external_prolongations_;
         

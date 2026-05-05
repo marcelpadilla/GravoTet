@@ -3,7 +3,7 @@
 Self-contained reference implementation accompanying the paper
 **_GravoTet: A Fast Multigrid Hierarchy Construction for Tetrahedral Meshes_**.
 
-The demo reproduces the `ours_pro` hierarchy construction and solves the
+The demo reproduces the Ours hierarchy construction and solves the
 Poisson and biharmonic test problems on a tetrahedral cube mesh, exactly
 matching the workflow described in the paper.
 
@@ -40,7 +40,7 @@ That one command will:
 
 1. install any missing Python packages (`numpy`, `scipy`, `matplotlib`, `pybind11`),
 2. build the local C++ extension via `pybind11`,
-3. build the `ours_pro` hierarchy once,
+3. build the Ours hierarchy once,
 4. solve the Poisson and biharmonic cube problems,
 5. write the combined figure and a JSON summary into `output/`.
 
@@ -79,7 +79,7 @@ GravoTet/
 └── gravotet_demo/         ← Python helpers and build scaffolding
     ├── __init__.py
     ├── pde.py             ← stiffness, mass, Poisson and biharmonic assembly
-    ├── solver.py          ← `ours_pro` hierarchy + V-cycle wrapper
+    ├── solver.py          ← Ours hierarchy + V-cycle wrapper
     ├── plotting.py        ← paper-style residual and timing figure
     ├── setup.py           ← pybind11 build configuration
     ├── requirements.txt   ← Python dependencies
@@ -90,7 +90,7 @@ GravoTet/
 
 | Paper concept | Source location |
 |---|---|
-| `ours_pro` hierarchy construction | [src/multigrid_solver.cpp](src/multigrid_solver.cpp) |
+| Ours hierarchy construction | [src/multigrid_solver.cpp](src/multigrid_solver.cpp) |
 | V-cycle solver and Galerkin coarse operators | [src/multigrid_solver_vcycle.cpp](src/multigrid_solver_vcycle.cpp) |
 | Python binding | [src/gravotet_binding.cpp](src/gravotet_binding.cpp) |
 | Stiffness `S`, lumped mass `M`, biharmonic `S M⁻¹ S` | [gravotet_demo/pde.py](gravotet_demo/pde.py) |
@@ -98,7 +98,7 @@ GravoTet/
 | Paper-style residual and timing plot | [gravotet_demo/plotting.py](gravotet_demo/plotting.py) |
 | End-to-end driver | [run_demo.py](run_demo.py) |
 
-The supplement is intentionally limited to the `ours_pro` method and to the
+The supplement is intentionally limited to the Ours method and to the
 two PDEs reported in the paper. CHOLMOD / SuiteSparse are not used in this
 supplement path; Eigen is vendored to keep the package self-contained and
 reproducible.

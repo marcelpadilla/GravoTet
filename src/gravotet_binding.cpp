@@ -3,7 +3,7 @@
  * @brief Minimal pybind11 bindings for the supplementary GravoTet MG package.
  *
  * The supplement only exposes the functionality required to build the
- * `ours_pro` hierarchy and solve Poisson and biharmonic test problems.
+ * Ours hierarchy and solve Poisson and biharmonic test problems.
  */
 
 #include <pybind11/eigen.h>
@@ -37,12 +37,11 @@ PYBIND11_MODULE(gravotet, m) {
             &GravoMG::TetMultigridSolver::constructProlongationOurs,
             py::arg("mesh"),
             py::arg("output_dir") = "",
-            "Build the boundary-aware `ours_pro` hierarchy")
+            "Build the boundary-aware Ours hierarchy")
         .def(
             "compute_coarse_operators",
             &GravoMG::TetMultigridSolver::computeCoarseOperators,
-            py::arg("A_fine"),
-            py::arg("method") = "ours")
+            py::arg("A_fine"))
         .def_static(
             "compute_product_rap",
             &GravoMG::TetMultigridSolver::computeProductRAP,
@@ -50,8 +49,7 @@ PYBIND11_MODULE(gravotet, m) {
         .def(
             "build_vcycle_hierarchy",
             &GravoMG::TetMultigridSolver::buildVCycleHierarchy,
-            py::arg("A_fine"),
-            py::arg("method") = "ours")
+            py::arg("A_fine"))
         .def(
             "solve_vcycle",
             [](GravoMG::TetMultigridSolver& solver,
@@ -125,7 +123,6 @@ PYBIND11_MODULE(gravotet, m) {
         .def_readwrite("search_radius_factor", &GravoMG::TetMultigridSolver::searchRadiusFactor)
         .def_readwrite("verbose", &GravoMG::TetMultigridSolver::verbose)
         .def_readwrite("feature_preserve", &GravoMG::TetMultigridSolver::featurePreserve)
-        .def_readwrite("method", &GravoMG::TetMultigridSolver::method)
         .def_readwrite("use_dense_coarse_solver", &GravoMG::TetMultigridSolver::use_dense_coarse_solver_)
         .def_readonly("all_vertices", &GravoMG::TetMultigridSolver::all_vertices)
         .def_readonly("all_tetrahedra", &GravoMG::TetMultigridSolver::all_tetrahedra)

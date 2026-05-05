@@ -28,7 +28,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
 
-    summary = run_suite(resolution=args.resolution, verbose=False)
+    summary, _ = run_suite(resolution=args.resolution, verbose=False)
 
     failed: list[str] = []
     for name, result in summary["problems"].items():

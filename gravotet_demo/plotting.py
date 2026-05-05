@@ -42,9 +42,9 @@ PAPER_TITLE_SIZE = 10
 PAPER_LEGEND_SIZE = 8
 PAPER_TICK_SIZE = 8
 REFERENCE_LINE_WIDTH = 1.0
-OURS_PRO_DARK = "#00441b"
-OURS_PRO_MEDIUM = "#238b45"
-OURS_PRO_LIGHT = "#74c476"
+OURS_DARK = "#00441b"
+OURS_MEDIUM = "#238b45"
+OURS_LIGHT = "#74c476"
 
 
 def apply_paper_style() -> None:
@@ -105,7 +105,7 @@ def _plot_convergence(ax, result: dict, title: str) -> None:
     ax.plot(
         time_points,
         relative,
-        color=OURS_PRO_MEDIUM,
+        color=OURS_MEDIUM,
         linewidth=lw,
         alpha=PAPER_LINE_ALPHA,
         label="Ours",
@@ -118,7 +118,7 @@ def _plot_convergence(ax, result: dict, title: str) -> None:
         linestyle="None",
         marker=PAPER_ITERATION_MARKER,
         markersize=ms,
-        color=OURS_PRO_MEDIUM,
+        color=OURS_MEDIUM,
         alpha=PAPER_LINE_ALPHA,
         zorder=6,
     )
@@ -173,9 +173,9 @@ def _plot_timing(ax, result: dict, title: str, annotate_reuse: bool, shared_hier
     total_s = hierarchy_s + setup_s + solve_s
 
     segments = [
-        (hierarchy_s, OURS_PRO_DARK, "Hierarchy"),
-        (setup_s, OURS_PRO_MEDIUM, "Setup"),
-        (solve_s, OURS_PRO_LIGHT, "Solve"),
+        (hierarchy_s, OURS_DARK, "Hierarchy"),
+        (setup_s, OURS_MEDIUM, "Setup"),
+        (solve_s, OURS_LIGHT, "Solve"),
     ]
 
     x_pos = -0.18
@@ -219,9 +219,9 @@ def _plot_timing(ax, result: dict, title: str, annotate_reuse: bool, shared_hier
 
     leg = ax.legend(
         handles=[
-            Patch(facecolor=OURS_PRO_DARK, label="Hierarchy"),
-            Patch(facecolor=OURS_PRO_MEDIUM, label="Setup"),
-            Patch(facecolor=OURS_PRO_LIGHT, label="Solve"),
+            Patch(facecolor=OURS_DARK, label="Hierarchy"),
+            Patch(facecolor=OURS_MEDIUM, label="Setup"),
+            Patch(facecolor=OURS_LIGHT, label="Solve"),
         ],
         loc="upper right",
         fontsize=PAPER_LEGEND_SIZE,
@@ -251,8 +251,16 @@ def save_combined_figure(summary: dict, output_dir: Path) -> Path:
     _plot_convergence(axes[1, 0], biharmonic, "Biharmonic")
     _plot_timing(axes[1, 1], biharmonic, "Biharmonic", annotate_reuse=True, shared_hierarchy_ms=shared_hierarchy_ms)
 
+    num_verts = summary["problems"]["poisson"]["num_vertices"]
+    if num_verts >= 1_000_000:
+        verts_str = f"{num_verts / 1_000_000:.1f}M"
+    elif num_verts >= 1_000:
+        verts_str = f"{num_verts // 1_000}k"
+    else:
+        verts_str = str(num_verts)
+
     fig.suptitle(
-        f"Cube{summary['resolution']} supplementary demo",
+        f"Cube{summary['resolution']}  |  #Vertices = {verts_str}",
         fontsize=PAPER_TITLE_SIZE + 2,
         fontweight="bold",
         y=1.01,

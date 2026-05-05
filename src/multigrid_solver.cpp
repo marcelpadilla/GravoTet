@@ -1,3 +1,7 @@
+#ifdef _MSC_VER
+#define _USE_MATH_DEFINES  // expose M_PI from <cmath> on MSVC
+#endif
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -54,7 +58,6 @@ template <> struct hash<std::pair<int, int>> {
   }
 };
 } // namespace std
-#define _USE_MATH_DEFINES
 #include "multigrid_solver.h"
 
 namespace GravoMG {
@@ -496,8 +499,6 @@ TetrahedralMesh TetMultigridSolver::generateCubeMesh(int resolution) {
     }
   }
 
-  std::cout << "Generated Cube Mesh with N=" << N << " (" << numVertices
-            << " vertices, " << numTets << " tetrahedra)\n";
   return mesh;
 }
 
@@ -1276,7 +1277,7 @@ void TetMultigridSolver::sortPriorityIndicesBySolidAngle(
 /**
  * @brief Sorts exterior indices for a given level by feature value (descending).
  * 
- * Used for "ours_feat" method to prioritize sampling of sharp features.
+ * Used to prioritize sampling of sharp boundary features.
  * Updates allExteriorIndices[level] in-place.
  */
 void TetMultigridSolver::sortExteriorIndicesByFeature(int level) {
@@ -1330,121 +1331,6 @@ void TetMultigridSolver::sortExteriorIndicesByFeature(int level) {
             count++;
         }
     }
-}
-
-// =============================================================================
-// SMOOTH COARSE INTERIOR VERTICES (ours_pro2)
-// =============================================================================
-// Inspired by GravoMG surface paper §4 "Reducing single-entry rows":
-//   "We obtain prolongation matrices with fewer single-entry rows by moving
-//    each sampled point to the mean of the points that form its graph Voronoi
-//    cell before we compute the closest point projections."
-//
-// This function shifts INTERIOR coarse vertices to their Voronoi cell centroids.
-// Exterior (boundary) coarse vertices are left untouched to preserve mesh geometry.
-//
-// Complexity: O(N_fine) — single parallel pass over fine vertices.
-void TetMultigridSolver::smoothCoarseInteriorVertices(
-    Eigen::MatrixXd &coarseVertices,
-    const std::vector<int> &sampleIndices,
-    const std::vector<size_t> &nearestSource,
-    const Eigen::MatrixXd &fineVertices,
-    int numCoarseExterior,
-    int iterations,
-    const std::vector<std::vector<int>> &coarseAdjList) {
-
-  const int numFine = static_cast<int>(fineVertices.rows());
-  const int numCoarse = static_cast<int>(coarseVertices.rows());
-
-  if (numCoarse == 0 || numFine == 0 || iterations < 1) return;
-
-  // ---- Iteration 0: Voronoi centroid shift ----
-  // Per-coarse-vertex accumulators: sum of fine positions + count.
-  // Use separate arrays for thread-safe parallel reduction.
-  // Each entry: (sum_x, sum_y, sum_z, count)
-  std::vector<double> sums(numCoarse * 4, 0.0);
-
-  // Phase 1: Accumulate fine vertex positions into their Voronoi cell centroids.
-  // Parallel with thread-local accumulators to avoid atomic contention.
-  const int numThreads = std::max(1, omp_get_max_threads());
-  std::vector<std::vector<double>> threadSums(numThreads, std::vector<double>(numCoarse * 4, 0.0));
-
-  #pragma omp parallel
-  {
-    int tid = 0;
-    #ifdef _OPENMP
-    tid = omp_get_thread_num();
-    #endif
-    auto &localSums = threadSums[tid];
-
-    #pragma omp for schedule(static)
-    for (int i = 0; i < numFine; ++i) {
-      const size_t cluster = nearestSource[i];
-      if (cluster >= static_cast<size_t>(numCoarse)) continue;
-      const size_t base = cluster * 4;
-      localSums[base + 0] += fineVertices(i, 0);
-      localSums[base + 1] += fineVertices(i, 1);
-      localSums[base + 2] += fineVertices(i, 2);
-      localSums[base + 3] += 1.0;
-    }
-  }
-
-  // Merge thread-local accumulators
-  for (int t = 0; t < numThreads; ++t) {
-    for (int c = 0; c < numCoarse * 4; ++c) {
-      sums[c] += threadSums[t][c];
-    }
-  }
-
-  // Phase 2: Apply centroid shift to interior coarse vertices only.
-  int shifted = 0;
-  #pragma omp parallel for reduction(+:shifted)
-  for (int c = numCoarseExterior; c < numCoarse; ++c) {
-    const size_t base = static_cast<size_t>(c) * 4;
-    const double count = sums[base + 3];
-    if (count > 0.5) {  // at least one fine vertex in this cluster
-      coarseVertices(c, 0) = sums[base + 0] / count;
-      coarseVertices(c, 1) = sums[base + 1] / count;
-      coarseVertices(c, 2) = sums[base + 2] / count;
-      shifted++;
-    }
-  }
-
-  std::cout << "  [ours_pro2] Shifted " << shifted << " / " << (numCoarse - numCoarseExterior)
-            << " interior coarse vertices to Voronoi cell centroids"
-            << " (kept " << numCoarseExterior << " exterior vertices fixed)\n";
-
-  // ---- Iterations 1+: Laplacian smoothing on coarse graph ----
-  // Each pass sets each interior coarse vertex to the average of its coarse-graph
-  // neighbors. Uses double-buffering (read from buffer, write to coarseVertices)
-  // to avoid read-write conflicts in the parallel loop.
-  if (iterations > 1 && !coarseAdjList.empty()) {
-    Eigen::MatrixXd buffer = coarseVertices;  // read-only copy for neighbor lookups
-
-    for (int iter = 1; iter < iterations; ++iter) {
-      int smoothed = 0;
-      #pragma omp parallel for reduction(+:smoothed)
-      for (int c = numCoarseExterior; c < numCoarse; ++c) {
-        const auto &neighbors = coarseAdjList[c];
-        if (neighbors.empty()) continue;
-        double sx = 0.0, sy = 0.0, sz = 0.0;
-        for (int n : neighbors) {
-          sx += buffer(n, 0);
-          sy += buffer(n, 1);
-          sz += buffer(n, 2);
-        }
-        const double inv = 1.0 / static_cast<double>(neighbors.size());
-        coarseVertices(c, 0) = sx * inv;
-        coarseVertices(c, 1) = sy * inv;
-        coarseVertices(c, 2) = sz * inv;
-        smoothed++;
-      }
-      buffer = coarseVertices;  // update buffer for next iteration
-
-      std::cout << "  [ours_pro2] Laplacian pass " << iter << ": smoothed "
-                << smoothed << " interior vertices\n";
-    }
-  }
 }
 
 // Build neighborhood matrix from tetrahedra connectivity
@@ -2067,9 +1953,8 @@ Eigen::MatrixXi TetMultigridSolver::buildVertexNeighbours(
 //   2. Coarse adjacency list (buildCoarseGraph)
 //   3. Coarse neighbor matrix (buildVertexNeighbours)
 //
-// This is the standard (non-exterior-first) variant.
-// A future coarseGraphBuilderExteriorFirst() will implement two-phase
-// Dijkstra and two-phase coarse graph construction for ours_pro.
+// This is the standard fallback variant.
+// coarseGraphBuilderExteriorFirst() implements the boundary-aware Ours path.
 void TetMultigridSolver::coarseGraphBuilder(
     const Eigen::MatrixXd &vertices,
     const std::vector<int> &sampleIndices,
@@ -2096,7 +1981,7 @@ void TetMultigridSolver::coarseGraphBuilder(
 // =============================================================================
 // TWO-PHASE COARSE GRAPH BUILDER (EXTERIOR FIRST)
 // =============================================================================
-// For ours_pro at level 1: builds coarse connectivity in two phases.
+// Builds coarse connectivity in two phases for the Ours hierarchy.
 //
 // Phase 1 (Exterior):
 //   - Dijkstra clustering using only exterior-only connectivity
@@ -2128,10 +2013,12 @@ void TetMultigridSolver::coarseGraphBuilderExteriorFirst(
   int numFineVerts = static_cast<int>(vertices.rows());
   int numFineExterior = static_cast<int>(fineExteriorIndices.size());
 
-  std::cout << "  [ExteriorFirst] numFineVerts=" << numFineVerts
-            << ", numFineExterior=" << numFineExterior
-            << ", numCoarsePoints=" << numCoarsePoints
-            << ", numCoarseExterior=" << numCoarseExterior << "\n";
+  if (verbose) {
+    std::cout << "  [ExteriorFirst] numFineVerts=" << numFineVerts
+              << ", numFineExterior=" << numFineExterior
+              << ", numCoarsePoints=" << numCoarsePoints
+              << ", numCoarseExterior=" << numCoarseExterior << "\n";
+  }
 
   // =========================================================================
   // Step 1: Build a global-indexed exterior-only fine neighbor matrix
@@ -2167,8 +2054,10 @@ void TetMultigridSolver::coarseGraphBuilderExteriorFirst(
   std::vector<int> interiorSources(sampleIndices.begin() + numCoarseExterior,
                                     sampleIndices.end());
 
-  std::cout << "  [ExteriorFirst] exteriorSources=" << exteriorSources.size()
-            << ", interiorSources=" << interiorSources.size() << "\n";
+  if (verbose) {
+    std::cout << "  [ExteriorFirst] exteriorSources=" << exteriorSources.size()
+              << ", interiorSources=" << interiorSources.size() << "\n";
+  }
 
   // Build fast lookup: is this fine vertex exterior?
   std::vector<bool> isExterior(numFineVerts, false);
@@ -2207,7 +2096,9 @@ void TetMultigridSolver::coarseGraphBuilderExteriorFirst(
       vertices, exteriorSources, exteriorNeighGlobal,
       shortestDistanceToSample, nearestSource);
 
-  std::cout << "  [ExteriorFirst] Phase 1 Dijkstra (exterior) done.\n";
+  if (verbose) {
+    std::cout << "  [ExteriorFirst] Phase 1 Dijkstra (exterior) done.\n";
+  }
 
   // =========================================================================
   // Step 4: Phase 1 Coarse Graph -- Build exterior-only coarse adjacency
@@ -2224,8 +2115,10 @@ void TetMultigridSolver::coarseGraphBuilderExteriorFirst(
   for (int i = 0; i < numCoarseExterior; ++i) {
     extEdgeCount += static_cast<int>(exteriorCoarseAdjList[i].size());
   }
-  std::cout << "  [ExteriorFirst] Phase 1 coarse graph: "
-            << extEdgeCount << " directed exterior edges.\n";
+  if (verbose) {
+    std::cout << "  [ExteriorFirst] Phase 1 coarse graph: "
+              << extEdgeCount << " directed exterior edges.\n";
+  }
 
   // =========================================================================
   // Step 5: Phase 2 Dijkstra -- Cluster interior vertices using full volume
@@ -2285,7 +2178,9 @@ void TetMultigridSolver::coarseGraphBuilderExteriorFirst(
     }
   }
 
-  std::cout << "  [ExteriorFirst] Phase 2 Dijkstra (interior) done.\n";
+  if (verbose) {
+    std::cout << "  [ExteriorFirst] Phase 2 Dijkstra (interior) done.\n";
+  }
 
   // =========================================================================
   // Step 6: Phase 2 Coarse Graph -- Build volume coarse adjacency
@@ -2336,8 +2231,10 @@ void TetMultigridSolver::coarseGraphBuilderExteriorFirst(
   for (int i = 0; i < numCoarsePoints; ++i) {
     volEdgeCount += static_cast<int>(volumeCoarseAdjList[i].size());
   }
-  std::cout << "  [ExteriorFirst] Phase 2 coarse graph (no ext-ext): "
-            << volEdgeCount << " directed edges.\n";
+  if (verbose) {
+    std::cout << "  [ExteriorFirst] Phase 2 coarse graph (no ext-ext): "
+              << volEdgeCount << " directed edges.\n";
+  }
 
   // Count how many Phase 1 exterior edges are NOT in the volume graph
   int uniqueExtEdges = 0;
@@ -2349,8 +2246,11 @@ void TetMultigridSolver::coarseGraphBuilderExteriorFirst(
       }
     }
   }
-  std::cout << "  [ExteriorFirst] Exterior edges unique to Phase 1: "
-            << uniqueExtEdges << " (these would be lost without exterior-first).\n";
+  if (verbose) {
+    std::cout << "  [ExteriorFirst] Exterior edges unique to Phase 1: "
+              << uniqueExtEdges
+              << " (these would be lost without exterior-first).\n";
+  }
 
   // Merge: union of exterior and volume adjacency lists
   // For each coarse vertex, take the union of both adj lists (sorted, unique)
@@ -2378,8 +2278,10 @@ void TetMultigridSolver::coarseGraphBuilderExteriorFirst(
   for (int i = 0; i < numCoarsePoints; ++i) {
     totalEdges += static_cast<int>(coarseAdjList[i].size());
   }
-  std::cout << "  [ExteriorFirst] Merged coarse graph: "
-            << totalEdges << " directed edges total.\n";
+  if (verbose) {
+    std::cout << "  [ExteriorFirst] Merged coarse graph: "
+              << totalEdges << " directed edges total.\n";
+  }
 
   // =========================================================================
   // Step 7: Build coarse neighbor matrix from merged adjacency
@@ -2426,9 +2328,11 @@ void TetMultigridSolver::coarseGraphBuilderExteriorFirst(
   }
   allExteriorVertices.push_back(coarseExteriorVerts);
 
-  std::cout << "  [ExteriorFirst] Stored coarse exterior neigh ("
-            << numCoarseExterior << " verts, maxDegree="
-            << maxExtDegree << ").\n";
+  if (verbose) {
+    std::cout << "  [ExteriorFirst] Stored coarse exterior neigh ("
+              << numCoarseExterior << " verts, maxDegree="
+              << maxExtDegree << ").\n";
+  }
 }
 
 // Construct geometric prolongation matrix
@@ -2666,35 +2570,37 @@ TetMultigridSolver::constructGeometricProlongationMatrix(
   Eigen::SparseMatrix<double> P(fineVertices.rows(), coarseVertices.rows());
   P.setFromTriplets(PTriplets.begin(), PTriplets.end());
 
-  std::cout << "  Prolongation matrix: " << P.rows() << " x " << P.cols()
-            << ", nnz = " << P.nonZeros() << "\n";
+    if (verbose) {
+    std::cout << "  Prolongation matrix: " << P.rows() << " x " << P.cols()
+          << ", nnz = " << P.nonZeros() << "\n";
 
-  // Report interpolation case statistics
-  int total_points = fineVertices.rows();
-  std::cout << "  Interpolation case breakdown:\n";
-  std::cout << "    Case 0 (Sample/Injection):  " << case_counts[0] << " ("
-            << (100.0 * case_counts[0] / total_points) << "%)\n";
-  std::cout << "    Case 1 (No neighbors):      " << case_counts[1] << " ("
-            << (100.0 * case_counts[1] / total_points) << "%)\n";
-  std::cout << "    Case 2 (Edge - 1 neighbor): " << case_counts[2] << " ("
-            << (100.0 * case_counts[2] / total_points) << "%)\n";
-  std::cout << "    Case 3 (Tet - barycentric): " << case_counts[3] << " ("
-            << (100.0 * case_counts[3] / total_points) << "%)\n";
-  std::cout << "    Case 4 (Triangle):          " << case_counts[4] << " ("
-            << (100.0 * case_counts[4] / total_points) << "%)\n";
-  std::cout << "    Case 5 (Edge projection):   " << case_counts[5] << " ("
-            << (100.0 * case_counts[5] / total_points) << "%)\n";
-  std::cout << "    Case 6 (Inverse distance):  " << case_counts[6] << " ("
-            << (100.0 * case_counts[6] / total_points) << "%)\n";
-  std::cout << "  Linear-exact cases (0-5): "
-            << (case_counts[0] + case_counts[1] + case_counts[2] +
-                case_counts[3] + case_counts[4] + case_counts[5])
-            << " ("
-            << (100.0 *
-                (case_counts[0] + case_counts[1] + case_counts[2] +
-                 case_counts[3] + case_counts[4] + case_counts[5]) /
-                total_points)
-            << "%)\n";
+    // Report interpolation case statistics
+    int total_points = fineVertices.rows();
+    std::cout << "  Interpolation case breakdown:\n";
+    std::cout << "    Case 0 (Sample/Injection):  " << case_counts[0] << " ("
+          << (100.0 * case_counts[0] / total_points) << "%)\n";
+    std::cout << "    Case 1 (No neighbors):      " << case_counts[1] << " ("
+          << (100.0 * case_counts[1] / total_points) << "%)\n";
+    std::cout << "    Case 2 (Edge - 1 neighbor): " << case_counts[2] << " ("
+          << (100.0 * case_counts[2] / total_points) << "%)\n";
+    std::cout << "    Case 3 (Tet - barycentric): " << case_counts[3] << " ("
+          << (100.0 * case_counts[3] / total_points) << "%)\n";
+    std::cout << "    Case 4 (Triangle):          " << case_counts[4] << " ("
+          << (100.0 * case_counts[4] / total_points) << "%)\n";
+    std::cout << "    Case 5 (Edge projection):   " << case_counts[5] << " ("
+          << (100.0 * case_counts[5] / total_points) << "%)\n";
+    std::cout << "    Case 6 (Inverse distance):  " << case_counts[6] << " ("
+          << (100.0 * case_counts[6] / total_points) << "%)\n";
+    std::cout << "  Linear-exact cases (0-5): "
+          << (case_counts[0] + case_counts[1] + case_counts[2] +
+            case_counts[3] + case_counts[4] + case_counts[5])
+          << " ("
+          << (100.0 *
+            (case_counts[0] + case_counts[1] + case_counts[2] +
+             case_counts[3] + case_counts[4] + case_counts[5]) /
+            total_points)
+          << "%)\n";
+    }
 
   return P;
 }
@@ -3127,6 +3033,63 @@ bool TetMultigridSolver::testProlongationMatrix(
   return allTestsPassed;
 }
 
+void TetMultigridSolver::exportHierarchyTimingJSON(
+    const std::string &filename) {
+  if (filename.empty()) {
+    return;
+  }
+
+  std::ofstream out(filename);
+  if (!out.is_open()) {
+    std::cerr << "Error: Could not open " << filename << " for writing JSON."
+              << std::endl;
+    return;
+  }
+
+  auto write_double_array = [&out](const char *name,
+                                   const std::vector<double> &values,
+                                   bool trailing_comma) {
+    out << "  \"" << name << "\": [";
+    for (size_t i = 0; i < values.size(); ++i) {
+      if (i > 0) {
+        out << ", ";
+      }
+      out << values[i];
+    }
+    out << "]";
+    if (trailing_comma) {
+      out << ",";
+    }
+    out << "\n";
+  };
+
+  out << "{\n";
+  out << "  \"num_vertices_start\": " << benchmark.num_vertices_start << ",\n";
+  out << "  \"init_ms\": " << benchmark.init_ms << ",\n";
+  out << "  \"init_exterior_extraction_ms\": "
+      << benchmark.init_exterior_extraction_ms << ",\n";
+  write_double_array("level_sampling_ms", benchmark.level_sampling_ms, true);
+  write_double_array("level_sampling_priority_ms",
+                     benchmark.level_sampling_priority_ms, true);
+  write_double_array("level_exterior_detect_ms",
+                     benchmark.level_exterior_detect_ms, true);
+  write_double_array("level_sort_feature_ms",
+                     benchmark.level_sort_feature_ms, true);
+  write_double_array("level_coarse_graph_ms",
+                     benchmark.level_coarse_graph_ms, true);
+  write_double_array("level_smooth_interior_ms",
+                     benchmark.level_smooth_interior_ms, true);
+  write_double_array("level_simplicial_complex_ms",
+                     benchmark.level_simplicial_complex_ms, true);
+  write_double_array("level_interpolation_ms",
+                     benchmark.level_interpolation_ms, true);
+  write_double_array("level_total_ms", benchmark.level_total_ms, true);
+  out << "  \"final_exterior_graph_ms\": " << benchmark.final_exterior_graph_ms
+      << ",\n";
+  out << "  \"total_hierarchy_ms\": " << benchmark.total_hierarchy_ms << "\n";
+  out << "}\n";
+}
+
 // =================================================================================================
 // MARK: Core Hierarchy Construction
 // =================================================================================================
@@ -3164,9 +3127,11 @@ private:
  */
 void TetMultigridSolver::constructProlongationOurs(
     const TetrahedralMesh &input_tet_mesh, const std::string &output_dir_arg) {
-  std::cout << "constructProlongationOurs( ): input tetrahedral mesh ("
-            << input_tet_mesh.numTetrahedra() << " tetrahedra, "
-            << input_tet_mesh.numVertices() << " vertices )\n";
+  if (verbose) {
+    std::cout << "constructProlongationOurs( ): input tetrahedral mesh ("
+              << input_tet_mesh.numTetrahedra() << " tetrahedra, "
+              << input_tet_mesh.numVertices() << " vertices )\n";
+  }
 
   // Decide timing output path early so we can safely export even if we exit
   // early (e.g., due to unexpected input or future guard-returns).
@@ -3194,10 +3159,6 @@ void TetMultigridSolver::constructProlongationOurs(
     std::cerr << "Warning: failed to create timing output directory for '"
               << timingPath << "': " << e.what() << "\n";
   }
-
-  // DEBUG: Trace execution for ours_pro investigation
-  std::cout << "  [DEBUG] constructProlongationOurs called with method='" << method << "'\n";
-  std::cout << "  [DEBUG] featurePreserve=" << (featurePreserve ? "true" : "false") << "\n";
 
   // =========================================================================
   // TIMING: Single timer with reset pattern
@@ -3265,15 +3226,15 @@ void TetMultigridSolver::constructProlongationOurs(
   // MARK: Extract Boundary (once at start)
   // =========================================================================
   std::vector<int> initial_exterior_priority;
-  if (method != "ours_base" && method != "ours_bshi") {
-    buildExteriorGraphNEWALT();
-    benchmark.init_exterior_extraction_ms = timer.elapsed();
-    
-    // Record number of exterior vertices at level 0
-    if (!allExteriorIndices.empty()) {
-      numSurfaceVerticesLevel0 = static_cast<int>(allExteriorIndices[0].size());
-      initial_exterior_priority = allExteriorIndices.front();
-    }
+  std::cout << "Building Ours hierarchy...\n";
+  std::cout << "  Extracting boundary graph...\n";
+  buildExteriorGraphNEWALT();
+  benchmark.init_exterior_extraction_ms = timer.elapsed();
+
+  // Record number of exterior vertices at level 0
+  if (!allExteriorIndices.empty()) {
+    numSurfaceVerticesLevel0 = static_cast<int>(allExteriorIndices[0].size());
+    initial_exterior_priority = allExteriorIndices.front();
   }
   timer.reset();
 
@@ -3289,18 +3250,19 @@ void TetMultigridSolver::constructProlongationOurs(
   // the local->global mapping in the neigh matrix becomes invalid.
   // coarseGraphBuilderExteriorFirst needs the original ordering for remapping.
   std::vector<int> original_exterior_indices_level0;
-  if ((method == "ours_pro" || method == "ours_pro2" || method == "ours_shi") && !allExteriorIndices.empty()) {
+  if (!allExteriorIndices.empty()) {
     original_exterior_indices_level0 = allExteriorIndices[0];
   }
 
-  // Persistent state for ours_pro multi-level exterior-first:
+  // Persistent state for the multi-level exterior-first hierarchy:
   // After each exterior-first iteration, these are populated for the NEXT iteration.
   // - original indices: needed for local->global remapping in coarseGraphBuilderExteriorFirst
   // - priority: feeds exterior indices into fastDiskSample for priority sampling
   std::vector<int> original_exterior_indices_for_next_level = original_exterior_indices_level0;
   std::vector<int> next_level_exterior_priority;
 
-  if ((method == "ours_feat" || method == "ours_pro" || method == "ours_pro2" || method == "ours_shi") && !allExteriorIndices.empty()) {
+  if (!allExteriorIndices.empty()) {
+    std::cout << "  Sorting boundary feature priority...\n";
     sortExteriorIndicesByFeature(0);
     initial_sort_feature_ms = timer.elapsed();
     initial_exterior_priority = allExteriorIndices.front();
@@ -3314,7 +3276,7 @@ void TetMultigridSolver::constructProlongationOurs(
          level_index < maxLevels) {
 
     level_index++;
-    std::cout << "Building level " << level_index << "...\n";
+    std::cout << "Level " << level_index << ": sampling coarse points...\n";
 
     // Level timing variables (all zero until measured)
     double t_sampling = 0.0;
@@ -3330,8 +3292,8 @@ void TetMultigridSolver::constructProlongationOurs(
       exterior_priority_indices = std::move(initial_exterior_priority);
       t_sort_feature = initial_sort_feature_ms;
       initial_exterior_priority.clear();
-    } else if ((method == "ours_pro" || method == "ours_pro2" || method == "ours_shi") && !next_level_exterior_priority.empty()) {
-      // For ours_pro/ours_pro2/ours_shi level 2+: use the coarse exterior indices propagated
+    } else if (!next_level_exterior_priority.empty()) {
+      // Level 2+: use the coarse exterior indices propagated
       // from the previous iteration's coarseGraphBuilderExteriorFirst.
       exterior_priority_indices = std::move(next_level_exterior_priority);
       next_level_exterior_priority.clear();
@@ -3373,88 +3335,44 @@ void TetMultigridSolver::constructProlongationOurs(
 
     std::vector<std::vector<int>> coarse_adj_list_next;
     Eigen::MatrixXi coarseNeigh_next;
-    int numCoarseExterior = 0;  // Set below for ours_pro/ours_pro2/ours_shi
+    int numCoarseExterior = 0;
+    std::cout << "Level " << level_index << ": building exterior-first coarse graph...\n";
 
-    if (method != "ours_pro" && method != "ours_pro2" && method != "ours_shi") {
+    if (allExteriorNeigh.size() >= static_cast<size_t>(level_index) &&
+        !allExteriorIndices.empty()) {
+      // The sampled exterior vertices are stored first and define the coarse exterior set.
+      numCoarseExterior = static_cast<int>(allExteriorIndices.back().size());
 
+      const Eigen::MatrixXi &fineExtNeigh = allExteriorNeigh[level_index - 1];
+      const std::vector<int> &fineOrigExtIndices =
+          (level_index == 1) ? original_exterior_indices_level0
+                             : original_exterior_indices_for_next_level;
+
+      coarseGraphBuilderExteriorFirst(
+          vertices_prev, sample_indices_next, neighbor_matrix_tet_prev,
+          sample_count_next,
+          numCoarseExterior,
+          fineExtNeigh,
+          fineOrigExtIndices,
+          shortestDistanceToSample_prev_to_next, nearestSource_prev_to_next,
+          coarse_adj_list_next, coarseNeigh_next);
+
+      original_exterior_indices_for_next_level.resize(numCoarseExterior);
+      std::iota(original_exterior_indices_for_next_level.begin(),
+                original_exterior_indices_for_next_level.end(), 0);
+      next_level_exterior_priority.resize(numCoarseExterior);
+      std::iota(next_level_exterior_priority.begin(),
+                next_level_exterior_priority.end(), 0);
+    } else {
       coarseGraphBuilder(
           vertices_prev, sample_indices_next, neighbor_matrix_tet_prev,
           sample_count_next,
           shortestDistanceToSample_prev_to_next, nearestSource_prev_to_next,
           coarse_adj_list_next, coarseNeigh_next);
-
-      t_coarse_graph = timer.elapsed();
-      timer.reset();
-
-    } else if (method == "ours_pro" || method == "ours_pro2" || method == "ours_shi") {
-
-      if (allExteriorNeigh.size() >= static_cast<size_t>(level_index) &&
-          !allExteriorIndices.empty()) {
-        // Use two-phase exterior-first coarse graph builder.
-        // exterior_priority_indices was updated by fastDiskSample to contain
-        // only the exterior vertices that were actually sampled. Its size is
-        // the number of coarse exterior samples.
-        numCoarseExterior = static_cast<int>(
-            allExteriorIndices.back().size());
-
-        // Select the correct fine exterior neigh and original indices for this level.
-        // Level 1 uses allExteriorNeigh[0] + original_exterior_indices_level0
-        //   (the pre-sort snapshot from buildExteriorGraphNEWALT)
-        // Level 2+ uses allExteriorNeigh[level-1] + original_exterior_indices_for_next_level
-        //   (identity mapping [0..N), set by the previous iteration)
-        const Eigen::MatrixXi &fineExtNeigh = allExteriorNeigh[level_index - 1];
-        const std::vector<int> &fineOrigExtIndices =
-            (level_index == 1) ? original_exterior_indices_level0
-                               : original_exterior_indices_for_next_level;
-
-        std::cout << "  [ours_pro] Using coarseGraphBuilderExteriorFirst "
-                  << "(level " << level_index << ", "
-                  << numCoarseExterior << " exterior samples, "
-                  << "fineExtNeigh=allExteriorNeigh[" << (level_index - 1) << "])\n";
-
-        coarseGraphBuilderExteriorFirst(
-            vertices_prev, sample_indices_next, neighbor_matrix_tet_prev,
-            sample_count_next,
-            numCoarseExterior,
-            fineExtNeigh,
-            fineOrigExtIndices,
-            shortestDistanceToSample_prev_to_next, nearestSource_prev_to_next,
-            coarse_adj_list_next, coarseNeigh_next);
-
-        // Prepare state for the NEXT iteration's exterior-first pass.
-        // coarseGraphBuilderExteriorFirst just pushed the coarse exterior neigh
-        // matrix to allExteriorNeigh (with local indices [0..numCoarseExterior-1]).
-        //
-        // For the NEXT level, the "fine" mesh is this level's coarse output.
-        // The exterior vertices in the coarse output are vertices [0..numCoarseExterior-1]
-        // (since fastDiskSample places priority samples first in sample_indices_next).
-        // allExteriorNeigh[level_index] uses local indices that directly correspond
-        // to global indices [0..numCoarseExterior-1] in the coarse level's vertex space.
-        // So the original indices for remapping are simply the identity mapping.
-        original_exterior_indices_for_next_level.resize(numCoarseExterior);
-        std::iota(original_exterior_indices_for_next_level.begin(),
-                  original_exterior_indices_for_next_level.end(), 0);
-        // The coarse exterior vertex indices (in coarse-level global space) become
-        // the sampling priority for the next level's fastDiskSample.
-        next_level_exterior_priority.resize(numCoarseExterior);
-        std::iota(next_level_exterior_priority.begin(),
-                  next_level_exterior_priority.end(), 0);
-
-      } else {
-        // Missing exterior data: fall back to standard coarse graph builder
-        std::cout << "  [ours_pro] Falling back to coarseGraphBuilder "
-                  << "(level " << level_index << ")\n";
-        coarseGraphBuilder(
-            vertices_prev, sample_indices_next, neighbor_matrix_tet_prev,
-            sample_count_next,
-            shortestDistanceToSample_prev_to_next, nearestSource_prev_to_next,
-            coarse_adj_list_next, coarseNeigh_next);
-      }
-
-      t_coarse_graph = timer.elapsed();
-      timer.reset();
-
     }
+
+    t_coarse_graph = timer.elapsed();
+    timer.reset();
 
     // =========================================================================
     // MARK: SIMPLICIAL COMPLEX BUILD & PROLONGATION MATRIX
@@ -3472,134 +3390,28 @@ void TetMultigridSolver::constructProlongationOurs(
       sample_vertices_next.row(i) = vertices_prev.row(sample_indices_next[i]);
     }
 
-    // ours_pro2: Shift interior coarse vertices to Voronoi cell centroids.
-    // This happens AFTER coarse graph build (topological, position-independent)
-    // and BEFORE simplicial complex + prolongation (which depend on positions).
-    // Matches GravoMG paper §4: "moving each sampled point to the mean of the
-    // points that form its graph Voronoi cell before closest point projections."
     double t_smooth_interior = 0.0;
-    if (method == "ours_pro2") {
-      smoothCoarseInteriorVertices(
-          sample_vertices_next, sample_indices_next,
-          nearestSource_prev_to_next, vertices_prev,
-          numCoarseExterior, smoothInteriorIterations,
-          coarse_adj_list_next);
-      t_smooth_interior = timer.elapsed();
-      timer.reset();
-    }
+    std::cout << "Level " << level_index << ": building simplicial complex...\n";
 
-    if (method != "ours_shi" && method != "ours_bshi") {
-      std::cout << "Building simplicial complex from coarse mesh...\n";
+    auto simplicialComplex =
+      buildSimplicialComplex(sample_vertices_next, coarse_adj_list_next);
+    tris = simplicialComplex[0];
+    connectedTris = simplicialComplex[1];
+    tets = simplicialComplex[2];
+    connectedTets = simplicialComplex[3];
 
-      auto simplicialComplex =
-        buildSimplicialComplex(sample_vertices_next, coarse_adj_list_next);
-      tris = simplicialComplex[0];
-      connectedTris = simplicialComplex[1];
-      tets = simplicialComplex[2];
-      connectedTets = simplicialComplex[3];
+    t_simplicial = timer.elapsed();
+    timer.reset();
 
-      t_simplicial = timer.elapsed();
-      timer.reset();
+    std::cout << "Level " << level_index << ": assembling prolongation...\n";
 
-      std::cout << "  Created " << tris.size() << " triangles, " << tets.size()
-                << " tetrahedra\n";
+    P = constructGeometricProlongationMatrix(
+      vertices_prev, sample_vertices_next, sample_indices_next,
+      nearestSource_prev_to_next, coarse_adj_list_next, tets, connectedTets,
+      tris, connectedTris);
 
-      // =========================================================================
-      // MARK: PROLONGATION MATRIX
-      // =========================================================================
-
-      std::cout << "Constructing prolongation matrix (geometric)...\n";
-
-      P = constructGeometricProlongationMatrix(
-        vertices_prev, sample_vertices_next, sample_indices_next,
-        nearestSource_prev_to_next, coarse_adj_list_next, tets, connectedTets,
-        tris, connectedTris);
-        
-      t_interpolation = timer.elapsed();
-      timer.reset();
-
-    } else {
-      std::cout << "Constructing prolongation matrix (OurShi geometric inverse-distance)...\n";
-      std::cout << "  [DEBUG] maxProlongationElements = " << maxProlongationElements << "\n";
-      if (!coarse_adj_list_next.empty()) {
-          std::cout << "  [DEBUG] coarse_adj_list_next[0].size() = " << coarse_adj_list_next[0].size() << "\n";
-      } else {
-          std::cout << "  [DEBUG] coarse_adj_list_next is EMPTY!\n";
-      }
-
-      // Simulate zero time for simplicial complex
-      t_simplicial = timer.elapsed();
-      timer.reset();
-
-      // Shi06 style inverse distance weight computation (Optimized Geometric)
-      long n = vertices_prev.rows();
-      long m = sample_count_next;
-      std::vector<Eigen::Triplet<double>> triplets;
-      triplets.reserve(n * (maxProlongationElements > 0 ? maxProlongationElements : 4)); 
-
-      // Pre-allocate working memory to avoid heap allocations in the tight loop
-      std::vector<std::pair<double, int>> dist_candidates;
-      dist_candidates.reserve(128); // max expected coarse neighbors
-      std::vector<double> weights;
-      weights.reserve(maxProlongationElements > 0 ? maxProlongationElements : 128);
-
-      for (long i = 0; i < n; ++i) {
-        int cluster_center = nearestSource_prev_to_next[i];
-        
-        dist_candidates.clear();
-        
-        // 1. Center itself
-        double dist0 = (vertices_prev.row(i) - sample_vertices_next.row(cluster_center)).norm();
-        dist_candidates.push_back({dist0, cluster_center});
-        
-        // 2. Coarse neighbors of the center
-        for (int neighbor : coarse_adj_list_next[cluster_center]) {
-          double dist = (vertices_prev.row(i) - sample_vertices_next.row(neighbor)).norm();
-          if (neighbor != cluster_center) {
-              dist_candidates.push_back({dist, neighbor});
-          }
-        }
-
-        // Enforce sparsity limit (maxProlongationElements) using fast partial_sort
-        size_t k = dist_candidates.size();
-        if (maxProlongationElements > 0 && k > static_cast<size_t>(maxProlongationElements)) {
-            k = maxProlongationElements;
-            std::partial_sort(dist_candidates.begin(), dist_candidates.begin() + k, dist_candidates.end());
-            dist_candidates.resize(k);
-        }
-
-        double sum_weights = 0.0;
-        weights.clear();
-        bool found_exact = false;
-
-        for (size_t j = 0; j < dist_candidates.size(); ++j) {
-          int c = dist_candidates[j].second;
-          double dist = dist_candidates[j].first;
-          if (dist < 1e-10) {
-            // Exact match
-            triplets.push_back(Eigen::Triplet<double>(i, c, 1.0));
-            found_exact = true;
-            break;
-          }
-          double w = 1.0 / dist;
-          weights.push_back(w);
-          sum_weights += w;
-        }
-
-        if (!found_exact && sum_weights > 0.0) {
-          double inv_sum = 1.0 / sum_weights;
-          for (size_t j = 0; j < dist_candidates.size(); ++j) {
-            triplets.push_back(Eigen::Triplet<double>(i, dist_candidates[j].second, weights[j] * inv_sum));
-          }
-        }
-      }
-
-      P.resize(n, m);
-      P.setFromTriplets(triplets.begin(), triplets.end());
-
-      t_interpolation = timer.elapsed();
-      timer.reset();
-    }
+    t_interpolation = timer.elapsed();
+    timer.reset();
 
     allP.push_back(P);
 
@@ -3648,26 +3460,15 @@ void TetMultigridSolver::constructProlongationOurs(
     allNearestSource.push_back(nearestSource_prev_to_next);
     allSampleIndices.push_back(sample_indices_next);
 
-    // Store depth data - REMOVED
-    // allDepth.push_back(depth_samples_next);
-
-    // Store simplicial complex data (triangles and tets from clique-based
-    // construction)
+    // Store simplicial complex data.
     allTris.push_back(tris);
     allTets.push_back(tets);
     allNeighSets.push_back(coarse_adj_list_next);
 
-    // pass on to next level
+    // Advance to the next level.
     vertices_prev = sample_vertices_next;
     neighbor_matrix_tet_prev = coarseNeigh_next;
-  
-  } // end of loop
-
-  // // MARK: EXTERIOR DETECTION (Final Level)
-  // // Catch up for the last level which was created in the final loop iteration
-  // timer.reset();
-  // buildExteriorGraph();
-  // benchmark.final_exterior_graph_ms = timer.elapsed();
+  }
 
   // =========================================================================
   // MARK: Export timing data
@@ -3675,14 +3476,13 @@ void TetMultigridSolver::constructProlongationOurs(
 
   benchmark.total_hierarchy_ms = total_timer.elapsed();
 
-  // Partition-drift check: total must equal sum of all buckets
   {
     double sum_components = benchmark.init_ms
         + benchmark.init_exterior_extraction_ms
         + std::accumulate(benchmark.level_total_ms.begin(), benchmark.level_total_ms.end(), 0.0)
         + benchmark.final_exterior_graph_ms;
     double drift = std::abs(benchmark.total_hierarchy_ms - sum_components);
-    if (drift > 5.0) { // >5ms drift = suspicious
+    if (drift > 5.0 && verbose) {
       std::cerr << "WARNING: Timing partition drift = " << drift
                 << " ms (total=" << benchmark.total_hierarchy_ms
                 << ", sum=" << sum_components << ")\n";
@@ -3692,433 +3492,14 @@ void TetMultigridSolver::constructProlongationOurs(
   exportHierarchyTimingJSON(timingPath);
   timing_exported = true;
 
-  // Log final hierarchy summary
-  std::cout << "\n=== Hierarchy Summary ===\n";
-  std::cout << "  Total levels: " << numLevels() << "\n";
-  std::cout << "  Vertices per level: ";
+  std::cout << "Ours hierarchy ready: ";
   for (size_t i = 0; i < nr_points.size(); ++i) {
     std::cout << nr_points[i];
-    if (i < nr_points.size() - 1)
+    if (i < nr_points.size() - 1) {
       std::cout << " -> ";
-  }
-  std::cout << "\n";
-  std::cout << "  Total time: " << benchmark.total_hierarchy_ms << " ms\n";
-}
-
-// Export benchmark data to NPZ
-void TetMultigridSolver::exportHierarchyTimingJSON(
-    const std::string &filename) {
-  if (filename.empty()) {
-    return;
-  }
-
-  std::ofstream out(filename);
-  if (!out.is_open()) {
-    std::cerr << "Error: Could not open " << filename << " for writing JSON."
-              << std::endl;
-    return;
-  }
-
-  out << "{\n";
-  out << "  \"cpp_timing\": {\n";
-  // --- Init phase ---
-  out << "    \"init_ms\": " << benchmark.init_ms << ",\n";
-  out << "    \"init_exterior_extraction_ms\": " << benchmark.init_exterior_extraction_ms << ",\n";
-
-  auto write_vector = [&](const std::string &name,
-                          const std::vector<double> &vec) {
-    out << "    \"" << name << "\": [";
-    for (size_t i = 0; i < vec.size(); ++i) {
-      out << vec[i];
-      if (i < vec.size() - 1)
-        out << ", ";
-    }
-    out << "],\n";
-  };
-
-  // --- Per-level coarsening loop ---
-  write_vector("level_sampling_ms", benchmark.level_sampling_ms);
-  write_vector("level_sampling_priority_ms",
-               benchmark.level_sampling_priority_ms);
-  write_vector("level_exterior_detect_ms", benchmark.level_exterior_detect_ms);
-  write_vector("level_sort_feature_ms", benchmark.level_sort_feature_ms);
-  write_vector("level_coarse_graph_ms", benchmark.level_coarse_graph_ms);
-  write_vector("level_smooth_interior_ms", benchmark.level_smooth_interior_ms);
-  write_vector("level_simplicial_complex_ms",
-               benchmark.level_simplicial_complex_ms);
-  write_vector("level_interpolation_ms", benchmark.level_interpolation_ms);
-  write_vector("level_total_ms", benchmark.level_total_ms);
-
-  // --- Finalize phase ---
-  out << "    \"final_exterior_graph_ms\": " << benchmark.final_exterior_graph_ms
-      << ",\n";
-
-  // --- Totals ---
-  out << "    \"total_hierarchy_ms\": " << benchmark.total_hierarchy_ms
-      << ",\n";
-  out << "    \"num_levels\": " << benchmark.level_total_ms.size() << ",\n";
-  out << "    \"num_vertices_start\": " << benchmark.num_vertices_start << "\n";
-  out << "  }\n";
-  out << "}\n";
-
-  out.close();
-  std::cout << "  Exported hierarchy timing to JSON: " << filename << "\n";
-
-}
-
-// =================================================================================================
-// MARK: Shi06 AMG Implementation
-// =================================================================================================
-
-/**
- * @brief Constructs multigrid hierarchy using Shi et al. (2006) algebraic
- * method.
- *
- * This method builds the hierarchy by:
- * 1. Sampling vertices using Maximum Delta Independent Set (MDIS)
- * 2. Creating coarse graph connectivity
- * 3. Computing prolongation operators based on inverse distance weighting
- * Use this method for comparison with geometric multigrid approaches.
- *
- * @param input_mesh The initial fine-level mesh.
- */
-void TetMultigridSolver::constructProlongationShi06(
-    const TetrahedralMesh &input_mesh, const std::string &output_dir_arg) {
-  
-  // Decide timing output path early so we can safely export even if we exit early
-  std::string timingPath;
-  {
-    std::string effectiveOutputDir =
-        output_dir_arg.empty() ? outputDir : output_dir_arg;
-    if (!effectiveOutputDir.empty()) {
-      std::string sep = "/";
-      if (effectiveOutputDir.back() == '/' ||
-          effectiveOutputDir.back() == '\\') {
-        sep = "";
-      }
-      timingPath = effectiveOutputDir + sep + "hierarchy_timing.json";
     }
   }
-
-  // Benchmark
-  Timer total_timer;
-  bool timing_exported = false;
-  struct TimingExportGuard {
-    TetMultigridSolver *self;
-    Timer *total;
-    std::string path;
-    bool *exported;
-    ~TimingExportGuard() {
-      if (self != nullptr && total != nullptr && exported != nullptr &&
-          !(*exported)) {
-        self->benchmark.total_hierarchy_ms = total->elapsed();
-        self->exportHierarchyTimingJSON(path);
-      }
-    }
-  } timing_guard{this, &total_timer, timingPath, &timing_exported};
-
-  benchmark = BenchmarkData();
-  benchmark.num_vertices_start = input_mesh.vertices.rows();
-
-  // If Hierarchy is already built (Ours), we reuse the Level 0 (sorted mesh)
-  // Otherwise we use input_mesh.
-  // This allows swapping P matrices for same fine grid linear system.
-  // This also affects which timer bucket we put "init" in, but for Shi06 it's negligible usually.
-
-  // Invalidate V-cycle hierarchy (algebraic operators must be rebuilt for new
-  // P)
-  vcycle_hierarchy_built_ = false;
-  vcycle_operators_.clear();
-  vcycle_diag_inv_.clear();
-  vcycle_prolongations_.clear();
-  coarse_solver_.reset();
-  coarse_solver_valid_ = false;
-  coarse_solver_name_ = "";
-
-  TetrahedralMesh meshToUse;
-  if (isHierarchyBuilt() && inputMesh.vertices.rows() != 0) {
-    if (verbose)
-      std::cout << "Using existing Sorted Mesh for Shi06 Level 0..."
-                << std::endl;
-    meshToUse = inputMesh;
-  } else {
-    if (verbose)
-      std::cout << "Using Input Mesh for Shi06 Level 0 (Standalone)..."
-                << std::endl;
-    meshToUse = input_mesh;
-    inputMesh = input_mesh; // Keep a copy if standalone
-  }
-  
-  // Record init time
-  benchmark.init_ms = total_timer.elapsed();
-
-  buildShi06Hierarchy(meshToUse);
-  
-  // Mark regular export as done (handled by caller or guard)
-  // Logic inside buildShi06Hierarchy will update benchmark struct
-  
-  // Update total time and export
-  benchmark.total_hierarchy_ms = total_timer.elapsed();
-  exportHierarchyTimingJSON(timingPath);
-  timing_exported = true;
-}
-
-void TetMultigridSolver::constructProlongationOurShi(
-    const TetrahedralMesh &input_mesh) {
-  if (verbose)
-    std::cout << "Constructing OurShi Hierarchy (Feature-Sorted)..."
-              << std::endl;
-
-  // Invalidate V-cycle hierarchy (algebraic operators must be rebuilt for new
-  // P)
-  vcycle_hierarchy_built_ = false;
-  vcycle_operators_.clear();
-  vcycle_diag_inv_.clear();
-  vcycle_prolongations_.clear();
-  coarse_solver_.reset();
-  coarse_solver_valid_ = false;
-  coarse_solver_name_ = "";
-
-  // Explicitly sort mesh by feature to ensure features come first in indices
-  inputMesh = input_mesh;
-
-  // Feature sort logic removed
-  numSurfaceVerticesLevel0 = 0;
-
-  // Ensure all_vertices[0] corresponds to the input mesh
-  all_vertices.clear();
-  all_vertices.push_back(inputMesh.vertices);
-
-  // Build hierarchy using input mesh
-  buildShi06Hierarchy(inputMesh);
-}
-
-void TetMultigridSolver::buildShi06Hierarchy(
-    const TetrahedralMesh &meshToUse) {
-  allP_shi06.clear();
-  all_vertices_shi06.clear();
-  allNeigh_shi06.clear();
-
-  // Level 0
-  all_vertices_shi06.push_back(meshToUse.vertices);
-  allNeigh_shi06.push_back(buildNeighborMatrixFromTetrahedra(
-      meshToUse.tetrahedra, meshToUse.vertices.rows()));
-
-  // Parameters
-  int k = 0;
-  Eigen::MatrixXd levelPoints = all_vertices_shi06[0];
-  Eigen::MatrixXi neighLevelK = allNeigh_shi06[0];
-
-  if (verbose)
-    std::cout << "Building Shi06 Hierarchy (ratio=" << ratio_shi06 << ")..."
-              << std::endl;
-
-  while (levelPoints.rows() > minVerts && k < maxLevels) {
-    Timer level_timer;
-    
-    // Average edge length for radius calculation
-    double avgEdgeLen =
-        computeAverageEdgeLengthFromNeigh(levelPoints, neighLevelK);
-    // Radius: cbrt(ratio_shi06) * avgEdgeLen (original Shi06 uses ratio=5.0)
-    double radius = std::cbrt(ratio_shi06) * avgEdgeLen;
-
-    // Data structure for coarse neighbors (graph connectivity)
-    std::vector<std::set<int>> neighborsList;
-
-    // Sample coarse points using MDIS
-    if (verbose)
-      std::cout << "Level " << k << ": Sampling..." << std::endl;
-    std::vector<int> samples =
-        maximumDeltaIndependentSet(levelPoints, neighLevelK, radius);
-        
-    double t_sampling = level_timer.elapsed();
-    level_timer.reset();
-
-    // Note: We create the level even if samples.size() < minVerts.
-    // The while loop condition will stop us on the NEXT iteration.
-    // This matches the behavior of Ours/AMG methods which go below minVerts.
-
-    // Initial setup for next level
-    size_t nextDoF = samples.size();
-    neighborsList.resize(nextDoF);
-
-    // Map from fine index to coarse index (if sampled)
-    std::vector<int> pointsToSampleMap(levelPoints.rows(), -1);
-    for (int i = 0; i < samples.size(); ++i) {
-      pointsToSampleMap[samples[i]] = i;
-    }
-
-    // Create coarse graph (2-ring connectivity on fine graph)
-    // And store coarse node positions
-    Eigen::MatrixXd tempPoints(nextDoF, levelPoints.cols());
-
-    for (int i = 0; i < nextDoF; ++i) {
-      int fineIdx = samples[i];
-      tempPoints.row(i) = levelPoints.row(fineIdx);
-
-      // Iterate 1-ring neighbors
-      for (int j = 0; j < neighLevelK.cols(); ++j) {
-        int neigh1 = neighLevelK(fineIdx, j);
-        if (neigh1 < 0)
-          break;
-
-        // If neighbor is a sample point, add connection
-        if (pointsToSampleMap[neigh1] != -1 && pointsToSampleMap[neigh1] != i) {
-          neighborsList[i].insert(pointsToSampleMap[neigh1]);
-        }
-
-        // Iterate 2-ring neighbors
-        for (int j2 = 0; j2 < neighLevelK.cols(); ++j2) {
-          int neigh2 = neighLevelK(neigh1, j2);
-          if (neigh2 < 0)
-            break;
-
-          if (pointsToSampleMap[neigh2] != -1 &&
-              pointsToSampleMap[neigh2] != i) {
-            neighborsList[i].insert(pointsToSampleMap[neigh2]);
-          }
-        }
-      }
-    }
-    
-    double t_graph = level_timer.elapsed();
-    level_timer.reset();
-
-    // Map set to vector
-    std::vector<std::vector<int>> coarseNeighList(nextDoF);
-    for (int i = 0; i < nextDoF; ++i) {
-      coarseNeighList[i].assign(neighborsList[i].begin(), neighborsList[i].end());
-    }
-
-    // Build Prolongation P (using inverse distance weighting)
-    if (verbose)
-      std::cout << "Level " << k << ": Interpolation..." << std::endl;
-
-    Eigen::SparseMatrix<double> P(levelPoints.rows(), nextDoF);
-    std::vector<Eigen::Triplet<double>> triplets;
-
-    // Iterate fine points (rows of P)
-    // 1. If sampled (fineIdx is in samples), P_ii = 1
-    // 2. If not sampled, P_ij = 1/dist(i, j) / sum, where j are coarse
-    // neighbors (2-ring)
-
-    for (int i = 0; i < levelPoints.rows(); ++i) {
-      // Check if fine point i is a coarse point
-      bool isCoarse = false;
-      int coarserIndex = -1;
-      // Linear scan optimization: pointsToSampleMap
-      if (pointsToSampleMap[i] != -1) {
-        isCoarse = true;
-        coarserIndex = pointsToSampleMap[i];
-      }
-
-      if (isCoarse) {
-        triplets.emplace_back(i, coarserIndex, 1.0);
-      } else {
-        // Collect contributing coarse nodes (from 1-ring of i in fine graph)
-        // Shi06 uses neighbors in fine graph that are coarse nodes.
-        // Wait, regular Shi06 definition: D_i = { j \in C : dist(i,j) <= radius
-        // } or graph neighs. Implementation: check neighbors of i in fine graph.
-        // If neighbor is coarse, add strict weight.
-
-        std::vector<int> contributingCoarse;
-        std::vector<double> dists;
-
-        // Check 1-ring
-        for (int nIdx = 0; nIdx < neighLevelK.cols(); ++nIdx) {
-          int neigh = neighLevelK(i, nIdx);
-          if (neigh < 0)
-            break;
-          if (pointsToSampleMap[neigh] != -1) {
-            contributingCoarse.push_back(pointsToSampleMap[neigh]);
-            double d = (levelPoints.row(i) - levelPoints.row(neigh)).norm();
-            dists.push_back(d);
-          }
-        }
-
-        // If no coarse 1-ring neighbors, check 2-ring?
-        // Original implementation just takes 1-ring. If empty, it's orphaned (dropped).
-        // (Alternative: force nearest coarse node)
-
-        if (contributingCoarse.empty()) {
-            // Fallback: connect to nearest sampled node (brute force or precomputed)
-             // For now, identity/drop (row will be zero -> singular).
-             // Better: Find ANY coarse node.
-             // We'll skip for now (Shi06 weakness).
-        } else {
-           // Calc weights
-           double sumW = 0.0;
-           std::vector<double> weights;
-           for(double d : dists) {
-               double w = (d < 1e-12) ? 1e12 : (1.0/d);
-               weights.push_back(w);
-               sumW += w;
-           }
-           for(size_t c=0; c<contributingCoarse.size(); ++c) {
-               triplets.emplace_back(i, contributingCoarse[c], weights[c]/sumW);
-           }
-        }
-      }
-    }
-
-    P.setFromTriplets(triplets.begin(), triplets.end());
-    
-    double t_interp = level_timer.elapsed();
-    level_timer.reset();
-
-    allP_shi06.push_back(P);
-    
-    // Store levels
-    all_vertices_shi06.push_back(tempPoints);
-    Eigen::MatrixXi coarseNeighMat =
-        buildVertexNeighbours(coarseNeighList, nextDoF);
-    allNeigh_shi06.push_back(coarseNeighMat);
-
-    // Update for next iteration
-    levelPoints = tempPoints;
-    neighLevelK = coarseNeighMat;
-    k++;
-    
-    // Record timings
-    benchmark.level_sampling_ms.push_back(t_sampling);
-    benchmark.level_coarse_graph_ms.push_back(t_graph);
-    benchmark.level_interpolation_ms.push_back(t_interp);
-    // Fill unused slots with 0
-    benchmark.level_sampling_priority_ms.push_back(0);
-    benchmark.level_exterior_detect_ms.push_back(0);
-    benchmark.level_sort_feature_ms.push_back(0);
-    benchmark.level_simplicial_complex_ms.push_back(0);
-    
-    benchmark.level_total_ms.push_back(t_sampling + t_graph + t_interp);
-  }
-}
-
-// Maximum Delta Independent Set Sampling (Shi06)
-std::vector<int> TetMultigridSolver::maximumDeltaIndependentSet(
-    const Eigen::MatrixXd &pos, const Eigen::MatrixXi &edges,
-    const double &radius) {
-  std::vector<bool> visited(edges.rows(), false);
-  std::vector<int> selection;
-  selection.reserve(edges.rows() / 4); // Estimation
-
-  for (int i = 0; i < edges.rows(); ++i) {
-    if (!visited[i]) {
-      selection.push_back(i);
-
-      // Mark neighbors within radius as visited (covered)
-      for (int j = 0; j < edges.cols(); ++j) {
-        int neighIdx = edges(i, j);
-        if (neighIdx < 0)
-          break;
-
-        double dist = (pos.row(i) - pos.row(neighIdx)).norm();
-        if (dist < radius) {
-          visited[neighIdx] = true;
-        }
-      }
-    }
-  }
-  return selection;
+  std::cout << " vertices (" << benchmark.total_hierarchy_ms << " ms)\n";
 }
 
 } // namespace GravoMG

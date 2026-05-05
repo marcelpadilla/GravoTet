@@ -1,6 +1,6 @@
 """Thin Python wrapper around the supplementary C++ hierarchy and V-cycle.
 
-This module keeps the Python side small: build the `ours_pro` hierarchy once,
+This module keeps the Python side small: build the Ours hierarchy once,
 assemble each PDE separately, and solve with the same V-cycle interface used in
 the paper experiments.
 """
@@ -16,11 +16,10 @@ from .pde import ProblemData
 
 
 def create_solver(gravotet: Any, mesh: Any, verbose: bool = False):
-    """Construct the `ours_pro` hierarchy once for the supplied mesh."""
+    """Construct the Ours hierarchy once for the supplied mesh."""
     solver = gravotet.MultigridSolver()
     solver.verbose = verbose
     solver.feature_preserve = True
-    solver.method = "ours_pro"
     solver.min_verts = 200
     solver.max_levels = 25
     solver.use_dense_coarse_solver = True
@@ -36,7 +35,7 @@ def solve_problem(solver: Any, problem: ProblemData, max_cycles: int = 150) -> d
     x0 = np.zeros(problem.b.shape[0], dtype=np.float64)
 
     setup_start = time.perf_counter()
-    ok = solver.build_vcycle_hierarchy(problem.A, "ours")
+    ok = solver.build_vcycle_hierarchy(problem.A)
     setup_ms = (time.perf_counter() - setup_start) * 1000.0
     if not ok:
         raise RuntimeError(f"Failed to build V-cycle hierarchy for {problem.name}")

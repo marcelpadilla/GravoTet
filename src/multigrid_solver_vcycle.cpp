@@ -13,6 +13,10 @@
  * operators produced there.
  */
 
+#ifdef _MSC_VER
+#define _USE_MATH_DEFINES  // expose M_PI from <cmath> on MSVC
+#endif
+
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -20,7 +24,6 @@
 #include <stdexcept>
 #include <vector>
 
-#define _USE_MATH_DEFINES
 #include "multigrid_solver.h"
 
 // =================================================================================================
@@ -29,9 +32,9 @@
 
 std::vector<Eigen::SparseMatrix<double>>
 GravoMG::TetMultigridSolver::computeCoarseOperators(
-    const Eigen::SparseMatrix<double> &A_fine, const std::string &method) {
+    const Eigen::SparseMatrix<double> &A_fine) {
   std::vector<Eigen::SparseMatrix<double>> coarse_ops;
-  const auto &prols = (method == "shi06") ? this->allP_shi06 : this->allP;
+  const auto &prols = this->allP;
 
   if (prols.empty()) {
     return coarse_ops;
@@ -40,8 +43,8 @@ GravoMG::TetMultigridSolver::computeCoarseOperators(
   Eigen::SparseMatrix<double> A_current = A_fine;
 
   if (this->verbose) {
-    std::cout << "[CPP] Computing coarse operators (" << method << ") for "
-              << prols.size() << " levels..." << std::endl;
+    std::cout << "[CPP] Computing coarse operators for " << prols.size()
+              << " levels..." << std::endl;
   }
 
   for (size_t i = 0; i < prols.size(); ++i) {
@@ -257,14 +260,12 @@ Eigen::VectorXd GravoMG::TetMultigridSolver::computeJacobi(
 }
 
 bool GravoMG::TetMultigridSolver::buildVCycleHierarchy(
-    const Eigen::SparseMatrix<double> &A_fine, const std::string &method) {
+    const Eigen::SparseMatrix<double> &A_fine) {
   if (verbose) {
-    std::cout << "[CPP] buildVCycleHierarchy called for method: " << method
-              << std::endl;
+    std::cout << "[CPP] buildVCycleHierarchy called for Ours" << std::endl;
   }
 
-  // Select prolongation operators: external (if set), or internal based on
-  // method
+  // Select prolongation operators: external (if set), otherwise use Ours.
   const std::vector<Eigen::SparseMatrix<double>> *prols_ptr = nullptr;
 
   if (use_external_prolongations_ && !external_prolongations_.empty()) {
@@ -273,8 +274,6 @@ bool GravoMG::TetMultigridSolver::buildVCycleHierarchy(
       std::cout << "[CPP] Using EXTERNAL prolongations ("
                 << external_prolongations_.size() << " levels)" << std::endl;
     }
-  } else if (method == "shi06") {
-    prols_ptr = &allP_shi06;
   } else {
     prols_ptr = &allP;
   }
@@ -283,9 +282,8 @@ bool GravoMG::TetMultigridSolver::buildVCycleHierarchy(
 
   if (prols.empty()) {
     if (verbose) {
-      std::cerr
-          << "[CPP] Error: No prolongation operators available for method: "
-          << method << std::endl;
+      std::cerr << "[CPP] Error: No prolongation operators available for Ours"
+                << std::endl;
     }
     return false;
   }
@@ -296,8 +294,8 @@ bool GravoMG::TetMultigridSolver::buildVCycleHierarchy(
   vcycle_num_levels_ = static_cast<int>(prols.size()) + 1;
 
   if (verbose) {
-    std::cout << "[CPP] Building V-cycle hierarchy (" << method
-              << "): " << vcycle_num_levels_ << " levels" << std::endl;
+    std::cout << "[CPP] Building V-cycle hierarchy: " << vcycle_num_levels_
+              << " levels" << std::endl;
   }
 
   // Build operators for each level using Galerkin projection
