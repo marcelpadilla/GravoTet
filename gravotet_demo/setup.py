@@ -1,8 +1,7 @@
-"""Build the minimal supplementary `gravotet` extension.
+"""Build the supplementary `gravotet` C++ extension.
 
-Only the sources needed for the paper's supplementary demo are compiled here.
-The build intentionally avoids SuiteSparse / CHOLMOD and relies only on
-`pybind11` plus the vendored Eigen headers.
+Invoked from `gravotet_demo/`; sources live one directory up under `src/` with
+vendored Eigen headers under `deps/eigen/`. No SuiteSparse/CHOLMOD dependency.
 """
 
 from __future__ import annotations
@@ -13,7 +12,8 @@ from pathlib import Path
 from pybind11.setup_helpers import Pybind11Extension, build_ext
 from setuptools import setup
 
-ROOT = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
 SRC = ROOT / "src"
 EIGEN = ROOT / "deps" / "eigen"
 

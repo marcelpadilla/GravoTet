@@ -1,40 +1,45 @@
 """Smoke test for the supplementary Poisson and biharmonic cube examples.
 
-This script is intended for quick validation of a clean checkout before the
-repository is distributed with the paper.
+Quick validation of a clean checkout. Exits non-zero if either problem fails to
+converge or exceeds its verification thresholds.
+
+Run from the repository root:
+
+    python -m gravotet_demo.test_cube_problems --resolution 10
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
-from run_demo import run_suite
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from run_demo import run_suite  # noqa: E402
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--resolution", type=int, default=10, help="Cube resolution used for the smoke test")
-    parser.add_argument("--output", type=Path, default=None, help="Optional JSON file for the test summary")
+    parser.add_argument("--resolution", type=int, default=10)
+    parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
 
     summary = run_suite(resolution=args.resolution, verbose=False)
 
-    failed = []
+    failed: list[str] = []
     for name, result in summary["problems"].items():
         if not result["converged"]:
             failed.append(f"{name}: solver did not converge")
         if result["timed_out"]:
             failed.append(f"{name}: solver timed out")
         if result["relative_residual"] > max(10.0 * result["tolerance"], 1e-10):
-            failed.append(
-                f"{name}: relative residual {result['relative_residual']:.3e} exceeds threshold"
-            )
+            failed.append(f"{name}: relative residual {result['relative_residual']:.3e} exceeds threshold")
         if result["relative_error"] > 1e-4:
-            failed.append(
-                f"{name}: relative error {result['relative_error']:.3e} exceeds threshold"
-            )
+            failed.append(f"{name}: relative error {result['relative_error']:.3e} exceeds threshold")
 
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -49,7 +54,8 @@ def main() -> int:
     print("Supplement smoke test PASSED")
     for name, result in summary["problems"].items():
         print(
-            f"  {name}: cycles={result['num_cycles']}, rel_res={result['relative_residual']:.3e}, "
+            f"  {name}: cycles={result['num_cycles']}, "
+            f"rel_res={result['relative_residual']:.3e}, "
             f"rel_err={result['relative_error']:.3e}"
         )
     return 0
