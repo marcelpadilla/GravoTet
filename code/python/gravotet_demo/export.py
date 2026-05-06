@@ -238,59 +238,75 @@ def _render_surface(verts: np.ndarray, tris: np.ndarray,
     fig.savefig(out_path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
-def _coarse_surface_triangles(
-    coarse_verts: np.ndarray,
-    coarse_tets: np.ndarray,
-    fine_surface_pos: set,
-    _ROUND: int = 6,
-) -> np.ndarray:
-    """Extract triangles on the exterior surface of a coarse hierarchy level.
+def _coarse_surface_triangles(coarse_verts: np.ndarray) -> np.ndarray:
+    """Triangulate the exterior surface of a coarse hierarchy level.
 
-    Rather than using the non-manifold boundary of the coarse simplicial
-    complex (which includes interior faces), this function looks at ALL triangle
-    faces of the coarse tetrahedra and keeps only those whose three vertices are
-    all classified as exterior (i.e. they coincide positionally with fine-level
-    surface vertices). These triangles form a clean approximation of the coarse
-    exterior surface.
+    For each pair of axis-aligned faces of the bounding box, collects all
+    coarse vertices that lie on that face (within a small tolerance) and
+    triangulates them with 2D Delaunay in the projected plane. This gives a
+    complete, hole-free surface triangulation that includes all coarse vertices
+    on each face — unlike a 3D convex hull, which drops coplanar interior
+    points on flat faces.
+
+    Triangle winding is corrected so all face normals point outward.
 
     Parameters
     ----------
-    coarse_verts    : (N, 3) float64 coarse vertex positions
-    coarse_tets     : (M, 4) int32 coarse tet connectivity
-    fine_surface_pos: set of (x,y,z) rounded tuples from the fine surface
-    _ROUND          : decimal rounding precision for position matching
+    coarse_verts : (N, 3) float64 coarse vertex positions
 
     Returns
     -------
-    (K, 3) int32 array of exterior surface triangle vertex indices
+    (K, 3) int32 array of outward-facing triangle vertex indices
     """
-    # Classify each coarse vertex as exterior or interior by position lookup.
-    exterior_mask = np.array([
-        tuple(np.round(v, _ROUND)) in fine_surface_pos for v in coarse_verts
-    ], dtype=bool)
+    from scipy.spatial import Delaunay
 
-    if len(coarse_tets) == 0 or not np.any(exterior_mask):
+    if len(coarse_verts) < 3:
         return np.zeros((0, 3), dtype=np.int32)
 
-    t = coarse_tets.astype(np.int32)
-    # All four triangle faces per tet.
-    all_faces = np.vstack([
-        t[:, [0, 1, 2]],
-        t[:, [0, 1, 3]],
-        t[:, [0, 2, 3]],
-        t[:, [1, 2, 3]],
-    ])
+    mn = coarse_verts.min(axis=0)
+    mx = coarse_verts.max(axis=0)
+    extent = mx - mn
+    if extent.min() < 1e-10:
+        return np.zeros((0, 3), dtype=np.int32)
 
-    # Deduplicate (keep original winding from first occurrence).
-    canonical = np.sort(all_faces, axis=1)
-    dt = np.dtype([("a", np.int32), ("b", np.int32), ("c", np.int32)])
-    structured = np.ascontiguousarray(canonical).view(dt).reshape(-1)
-    _, idx = np.unique(structured, return_index=True)
-    unique_faces = all_faces[idx]
+    # Face membership tolerance: 4% of the smallest bounding-box dimension.
+    eps = extent.min() * 0.04
+    center = (mn + mx) / 2.0
+    all_tris: list[np.ndarray] = []
 
-    # Retain only faces where every vertex is on the exterior.
-    ext_face_mask = np.all(exterior_mask[unique_faces], axis=1)
-    return unique_faces[ext_face_mask].astype(np.int32)
+    for axis in range(3):
+        other = [i for i in range(3) if i != axis]
+        for side_val in [mn[axis], mx[axis]]:
+            face_mask = np.abs(coarse_verts[:, axis] - side_val) < eps
+            face_idx = np.where(face_mask)[0]
+            if len(face_idx) < 3:
+                continue
+
+            pts_2d = coarse_verts[face_idx][:, other]
+            # Guard against degenerate 2D point sets.
+            if np.linalg.matrix_rank(pts_2d - pts_2d[0]) < 2:
+                continue
+            try:
+                d = Delaunay(pts_2d)
+            except Exception:
+                continue
+
+            tri_global = face_idx[d.simplices].copy()  # (K, 3) global indices
+
+            # Correct winding to outward-facing.
+            for k in range(len(tri_global)):
+                v0 = coarse_verts[tri_global[k, 0]]
+                v1 = coarse_verts[tri_global[k, 1]]
+                v2 = coarse_verts[tri_global[k, 2]]
+                n = np.cross(v1 - v0, v2 - v0)
+                fc = (v0 + v1 + v2) / 3.0
+                if n.dot(fc - center) < 0:
+                    tri_global[k, 1], tri_global[k, 2] = tri_global[k, 2], tri_global[k, 1]
+            all_tris.append(tri_global)
+
+    if not all_tris:
+        return np.zeros((0, 3), dtype=np.int32)
+    return np.vstack(all_tris).astype(np.int32)
 
 
 
@@ -319,25 +335,17 @@ def save_hierarchy_meshes(solver: Any, output_dir: Path) -> list[Path]:
     n_levels = len(solver.all_vertices)
     ply_paths: list[Path] = []
 
-    # Precompute fine exterior positions once (used for coarse level renders).
+    # Fine-level boundary triangles (used for level-0 render and PLY depth).
     fine_verts = np.asarray(solver.all_vertices[0], dtype=np.float64)
     fine_tets = np.asarray(solver.all_tetrahedra[0], dtype=np.int32)
     fine_boundary_tris = _find_boundary_triangles(fine_tets)
-    _ROUND = 6
-    if len(fine_boundary_tris) > 0:
-        fine_surf_idx = np.unique(fine_boundary_tris)
-        fine_surface_pos = {
-            tuple(np.round(fine_verts[vi], _ROUND)) for vi in fine_surf_idx
-        }
-    else:
-        fine_surface_pos = set()
 
     for i in range(n_levels):
         verts = np.asarray(solver.all_vertices[i], dtype=np.float64)
         tets = np.asarray(solver.all_tetrahedra[i], dtype=np.int32)
 
         # Boundary faces of the coarse tet complex (used for PLY depth attr).
-        boundary_tris = _find_boundary_triangles(tets)
+        boundary_tris = _find_boundary_triangles(tets) if i > 0 else fine_boundary_tris
         depth = _surface_depth(len(verts), boundary_tris)
 
         # --- PLY ---
@@ -360,11 +368,10 @@ def save_hierarchy_meshes(solver: Any, output_dir: Path) -> list[Path]:
             _render_surface(verts, fine_boundary_tris, title, png_path,
                             draw_edges=False)
         else:
-            # Coarse levels: filter to only triangles whose three vertices are
-            # on the fine exterior surface. This avoids rendering interior faces
-            # of the non-manifold coarse simplicial complex.
-            render_tris = _coarse_surface_triangles(
-                verts, tets, fine_surface_pos, _ROUND)
+            # Coarse levels: convex hull of all coarse vertices gives a
+            # hole-free exterior surface triangulation. Interior coarse
+            # vertices are never on the convex hull for convex domains.
+            render_tris = _coarse_surface_triangles(verts)
             _render_surface(verts, render_tris, title, png_path,
                             draw_edges=True)
 
