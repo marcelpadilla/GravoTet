@@ -6,7 +6,8 @@ biharmonic cube problems, and writes the following into `output/`:
 
   - combined_cube{resolution}.png  -- residual-vs-time and timing figure
   - data.json                      -- all computation metrics
-  - meshes/level_{i}.npz           -- vertex positions and connectivity per hierarchy level
+  - meshes/level_{i}.ply           -- surface mesh per hierarchy level (ASCII PLY, vertices + boundary triangles)
+  - meshes/level_{i}.png           -- Phong-shaded surface render per hierarchy level
   - prolongations.npz              -- all prolongation matrices in CSR format
 
 Run from the repository root:
@@ -214,7 +215,7 @@ def main() -> int:
     _print_summary(summary)
     print(f"Figure:         {png_path.name}")
     print(f"JSON:           {json_path.name}")
-    print(f"Meshes:         output/meshes/  ({summary['hierarchy_levels']} levels)")
+    print(f"Meshes:         output/meshes/  ({summary['hierarchy_levels']} levels, PLY + PNG render per level)")
     print(f"Prolongations:  prolongations.npz")
     return 0
 
