@@ -154,24 +154,27 @@ def _setup_ax(ax, verts: np.ndarray, elev: float, azim: float) -> None:
 
 
 def _render_surface(verts: np.ndarray, tris: np.ndarray,
-                    title: str, out_path: Path) -> None:
-    """Render the boundary surface of the fine mesh as a Phong-shaded PNG.
+                    title: str, out_path: Path,
+                    draw_edges: bool = False) -> None:
+    """Render the boundary surface as a Phong-shaded PNG.
 
     Uses matplotlib Poly3DCollection with back-face culling and ambient+diffuse
-    shading. Intended for the finest hierarchy level (level 0) where boundary
-    triangles form a meaningful, manifold-like surface.
+    shading. When draw_edges=True a wireframe overlay is drawn on top of the
+    shaded faces, scaling edge width with the inverse of the triangle count so
+    edges remain clearly visible at coarse levels.
 
     Parameters
     ----------
-    verts    : (N, 3) float64 vertex positions
-    tris     : (K, 3) int32 boundary triangle indices
-    title    : figure title string
-    out_path : destination PNG path
+    verts      : (N, 3) float64 vertex positions
+    tris       : (K, 3) int32 boundary triangle indices
+    title      : figure title string
+    out_path   : destination PNG path
+    draw_edges : if True, overlay wireframe edges on the shaded surface
     """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+    from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
 
     ELEV, AZIM = 25.0, 45.0
     BASE_COLOR = np.array([0.27, 0.51, 0.71])  # steel blue
@@ -195,10 +198,14 @@ def _render_surface(verts: np.ndarray, tris: np.ndarray,
         dot = normals @ light
         front = dot > 0.0
 
+        # Face alpha: slightly more transparent when edges will be drawn so
+        # the wireframe stands out clearly.
+        face_alpha = 0.80 if draw_edges else 0.95
+
         if np.any(front):
             shading = np.clip(0.35 + 0.65 * dot[front], 0.2, 1.0)
             face_rgb = shading[:, None] * BASE_COLOR
-            rgba = np.column_stack([face_rgb, np.full(len(shading), 0.95)])
+            rgba = np.column_stack([face_rgb, np.full(len(shading), face_alpha)])
 
             tri_verts = np.stack([v0[front], v1[front], v2[front]], axis=1)
             poly = Poly3DCollection(tri_verts)
@@ -206,6 +213,24 @@ def _render_surface(verts: np.ndarray, tris: np.ndarray,
             poly.set_edgecolor("none")
             ax.add_collection3d(poly)
 
+        if draw_edges:
+            # Collect unique edges from ALL surface triangles (not just front-
+            # facing) so silhouette and back edges are also visible.
+            edge_set: set[tuple[int, int]] = set()
+            for tri in tris:
+                for k in range(3):
+                    e = (int(tri[k]), int(tri[(k + 1) % 3]))
+                    edge_set.add(e if e[0] < e[1] else (e[1], e[0]))
+
+            # Scale line width inversely with triangle count:
+            # few triangles (coarse) → thick, clearly visible edges;
+            # many triangles (dense) → thin, uncluttered lines.
+            lw = max(0.4, min(2.0, 300.0 / max(len(tris), 1)))
+            edge_segs = [[verts[a], verts[b]] for a, b in edge_set]
+            lc = Line3DCollection(edge_segs, linewidths=lw,
+                                   colors=[[0.08, 0.15, 0.25]], alpha=0.6)
+            ax.add_collection3d(lc)
+
     _setup_ax(ax, verts, ELEV, AZIM)
     ax.set_title(title, fontsize=11, pad=8)
     fig.patch.set_facecolor("white")
@@ -213,57 +238,61 @@ def _render_surface(verts: np.ndarray, tris: np.ndarray,
     fig.savefig(out_path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
+def _coarse_surface_triangles(
+    coarse_verts: np.ndarray,
+    coarse_tets: np.ndarray,
+    fine_surface_pos: set,
+    _ROUND: int = 6,
+) -> np.ndarray:
+    """Extract triangles on the exterior surface of a coarse hierarchy level.
 
-def _render_scatter(verts: np.ndarray, exterior_mask: np.ndarray,
-                    title: str, out_path: Path) -> None:
-    """Render coarse hierarchy vertices as a scatter plot.
-
-    Exterior vertices (on the fine mesh boundary) are drawn in a darker blue;
-    interior vertices in a lighter, semi-transparent blue. This makes the
-    boundary-aware sampling visible for coarser levels.
+    Rather than using the non-manifold boundary of the coarse simplicial
+    complex (which includes interior faces), this function looks at ALL triangle
+    faces of the coarse tetrahedra and keeps only those whose three vertices are
+    all classified as exterior (i.e. they coincide positionally with fine-level
+    surface vertices). These triangles form a clean approximation of the coarse
+    exterior surface.
 
     Parameters
     ----------
-    verts         : (N, 3) float64 vertex positions
-    exterior_mask : (N,) bool — True for vertices on the original fine boundary
-    title         : figure title string
-    out_path      : destination PNG path
+    coarse_verts    : (N, 3) float64 coarse vertex positions
+    coarse_tets     : (M, 4) int32 coarse tet connectivity
+    fine_surface_pos: set of (x,y,z) rounded tuples from the fine surface
+    _ROUND          : decimal rounding precision for position matching
+
+    Returns
+    -------
+    (K, 3) int32 array of exterior surface triangle vertex indices
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    # Classify each coarse vertex as exterior or interior by position lookup.
+    exterior_mask = np.array([
+        tuple(np.round(v, _ROUND)) in fine_surface_pos for v in coarse_verts
+    ], dtype=bool)
 
-    ELEV, AZIM = 25.0, 45.0
+    if len(coarse_tets) == 0 or not np.any(exterior_mask):
+        return np.zeros((0, 3), dtype=np.int32)
 
-    fig = plt.figure(figsize=(5, 5), dpi=150)
-    ax = fig.add_subplot(111, projection="3d")
+    t = coarse_tets.astype(np.int32)
+    # All four triangle faces per tet.
+    all_faces = np.vstack([
+        t[:, [0, 1, 2]],
+        t[:, [0, 1, 3]],
+        t[:, [0, 2, 3]],
+        t[:, [1, 2, 3]],
+    ])
 
-    if len(verts) > 0:
-        pt_size = max(4.0, min(40.0, 12000.0 / len(verts)))
+    # Deduplicate (keep original winding from first occurrence).
+    canonical = np.sort(all_faces, axis=1)
+    dt = np.dtype([("a", np.int32), ("b", np.int32), ("c", np.int32)])
+    structured = np.ascontiguousarray(canonical).view(dt).reshape(-1)
+    _, idx = np.unique(structured, return_index=True)
+    unique_faces = all_faces[idx]
 
-        interior = ~exterior_mask
-        if np.any(interior):
-            iv = verts[interior]
-            ax.scatter(iv[:, 0], iv[:, 1], iv[:, 2],
-                       s=pt_size, c=[[0.55, 0.72, 0.88]], alpha=0.55,
-                       edgecolors="none", depthshade=True, label="interior")
-        if np.any(exterior_mask):
-            ev = verts[exterior_mask]
-            ax.scatter(ev[:, 0], ev[:, 1], ev[:, 2],
-                       s=pt_size * 1.4, c=[[0.18, 0.42, 0.65]], alpha=0.90,
-                       edgecolors="none", depthshade=True, label="boundary")
-
-    _setup_ax(ax, verts, ELEV, AZIM)
-    ax.set_title(title, fontsize=11, pad=8)
-    fig.patch.set_facecolor("white")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
+    # Retain only faces where every vertex is on the exterior.
+    ext_face_mask = np.all(exterior_mask[unique_faces], axis=1)
+    return unique_faces[ext_face_mask].astype(np.int32)
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 def save_hierarchy_meshes(solver: Any, output_dir: Path) -> list[Path]:
     """Export each hierarchy level as a PLY mesh file and a PNG render.
@@ -271,13 +300,9 @@ def save_hierarchy_meshes(solver: Any, output_dir: Path) -> list[Path]:
     For each level i the following files are written to output_dir/meshes/:
       - level_{i}.ply   ASCII PLY: all vertices with depth attribute (0=surface,
                         1=interior) and the extracted surface triangles.
-      - level_{i}.png   Render: Phong-shaded surface for level 0; scatter plot
-                        of coarse nodes (exterior in dark blue, interior in light
-                        blue) for levels 1 and above.
-
-    The exterior/interior classification at coarse levels is derived from the
-    fine mesh boundary: a coarse vertex is considered exterior if its position
-    matches a fine boundary vertex (nearest-position lookup with 6-digit rounding).
+      - level_{i}.png   Phong-shaded surface render. Level 0 shows smooth shaded
+                        faces; coarser levels additionally overlay a wireframe so
+                        the triangle resolution and coarsening are clearly visible.
 
     Parameters
     ----------
@@ -294,12 +319,10 @@ def save_hierarchy_meshes(solver: Any, output_dir: Path) -> list[Path]:
     n_levels = len(solver.all_vertices)
     ply_paths: list[Path] = []
 
-    # Precompute fine-level surface once for use across all coarse levels.
+    # Precompute fine exterior positions once (used for coarse level renders).
     fine_verts = np.asarray(solver.all_vertices[0], dtype=np.float64)
     fine_tets = np.asarray(solver.all_tetrahedra[0], dtype=np.int32)
     fine_boundary_tris = _find_boundary_triangles(fine_tets)
-
-    # Build a rounded-position set for O(1) exterior lookup at coarse levels.
     _ROUND = 6
     if len(fine_boundary_tris) > 0:
         fine_surf_idx = np.unique(fine_boundary_tris)
@@ -313,6 +336,7 @@ def save_hierarchy_meshes(solver: Any, output_dir: Path) -> list[Path]:
         verts = np.asarray(solver.all_vertices[i], dtype=np.float64)
         tets = np.asarray(solver.all_tetrahedra[i], dtype=np.int32)
 
+        # Boundary faces of the coarse tet complex (used for PLY depth attr).
         boundary_tris = _find_boundary_triangles(tets)
         depth = _surface_depth(len(verts), boundary_tris)
 
@@ -332,15 +356,17 @@ def save_hierarchy_meshes(solver: Any, output_dir: Path) -> list[Path]:
         png_path = mesh_dir / f"level_{i}.png"
 
         if i == 0:
-            # Fine level: Phong-shaded surface mesh render.
-            _render_surface(verts, boundary_tris, title, png_path)
+            # Fine level: all boundary faces form a clean manifold surface.
+            _render_surface(verts, fine_boundary_tris, title, png_path,
+                            draw_edges=False)
         else:
-            # Coarse levels: scatter plot with exterior/interior coloring
-            # derived from the fine mesh boundary.
-            exterior_mask = np.array([
-                tuple(np.round(v, _ROUND)) in fine_surface_pos for v in verts
-            ], dtype=bool)
-            _render_scatter(verts, exterior_mask, title, png_path)
+            # Coarse levels: filter to only triangles whose three vertices are
+            # on the fine exterior surface. This avoids rendering interior faces
+            # of the non-manifold coarse simplicial complex.
+            render_tris = _coarse_surface_triangles(
+                verts, tets, fine_surface_pos, _ROUND)
+            _render_surface(verts, render_tris, title, png_path,
+                            draw_edges=True)
 
     return ply_paths
 
