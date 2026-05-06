@@ -126,6 +126,10 @@ PYBIND11_MODULE(gravotet, m) {
         .def_readwrite("use_dense_coarse_solver", &GravoMG::TetMultigridSolver::use_dense_coarse_solver_)
         .def_readonly("all_vertices", &GravoMG::TetMultigridSolver::all_vertices)
         .def_readonly("all_tetrahedra", &GravoMG::TetMultigridSolver::all_tetrahedra)
+        // all_tris[j] contains the free triangles (not part of any tet) for
+        // hierarchy level j+1.  Each triangle is a list of 3 vertex indices
+        // into all_vertices[j+1].
+        .def_readonly("all_tris", &GravoMG::TetMultigridSolver::allTris)
         .def_readonly("all_P", &GravoMG::TetMultigridSolver::allP)
         .def_readonly("nr_points", &GravoMG::TetMultigridSolver::nr_points);
 

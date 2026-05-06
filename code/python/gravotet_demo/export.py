@@ -1,13 +1,20 @@
 """Hierarchy export utilities for the supplementary demo.
 
 Saves the multigrid hierarchy produced by the C++ solver to disk:
-  - output/meshes/level_{i}.ply  -- ASCII PLY: vertices (x,y,z,depth) + surface triangles
-  - output/meshes/level_{i}.png  -- matplotlib Phong-shaded surface render per level
+  - output/meshes/level_{i}.ply  -- ASCII PLY: all vertices + all triangles of the
+                                    simplicial complex (tet boundary faces + free
+                                    triangles).  Vertices carry a depth attribute
+                                    (0 = surface, 1 = interior).
+  - output/meshes/level_{i}.png  -- Phong-shaded render of the actual simplicial
+                                    complex faces, with wireframe overlay for coarse
+                                    levels.  No transparency.
   - output/prolongations.npz     -- all prolongation operators in CSR format
 
-The PLY depth attribute is 0 for surface (boundary) vertices and 1 for interior
-vertices. Surface triangles are faces of the tet mesh that appear exactly once
-(i.e., are not shared between two tetrahedra).
+At level 0 the input is a manifold tetrahedral mesh; the simplicial complex is
+simply the exterior surface (faces appearing exactly once in the tet connectivity).
+At coarse levels the hierarchy builds a non-manifold simplicial complex: the
+surface triangles are the boundary faces of the tet sub-complex plus any free
+triangles (2-simplices not contained in any tetrahedron).
 
 Convention: P[i] maps level i+1 (coarse) to level i (fine), shape (N_fine, N_coarse).
 """
@@ -58,6 +65,43 @@ def _find_boundary_triangles(tets: np.ndarray) -> np.ndarray:
     return faces[counts[inv] == 1].astype(np.int32)
 
 
+def _simplicial_complex_triangles(
+    tets: np.ndarray, free_tris: list
+) -> np.ndarray:
+    """Collect all surface triangles of the simplicial complex at a coarse level.
+
+    The complete triangle set = boundary faces of the tet sub-complex (faces
+    appearing exactly once) UNION the free triangles (2-simplices not contained
+    in any tetrahedron, as returned by buildSimplicialComplex in C++).
+
+    Parameters
+    ----------
+    tets      : (M, 4) int32 tet indices at this level
+    free_tris : list of [v0, v1, v2] lists (from solver.all_tris[level-1])
+
+    Returns
+    -------
+    (K, 3) int32 triangle array covering the full simplicial complex surface
+    """
+    boundary = _find_boundary_triangles(tets)
+
+    if free_tris:
+        free_arr = np.array(free_tris, dtype=np.int32).reshape(-1, 3)
+    else:
+        free_arr = np.zeros((0, 3), dtype=np.int32)
+
+    if len(boundary) == 0:
+        return free_arr
+    if len(free_arr) == 0:
+        return boundary
+
+    combined = np.vstack([boundary, free_arr])
+    # Deduplicate by canonical (sorted) key so no face is drawn twice.
+    canonical = np.sort(combined, axis=1)
+    _, idx = np.unique(canonical, axis=0, return_index=True)
+    return combined[idx].astype(np.int32)
+
+
 def _surface_depth(num_verts: int, boundary_tris: np.ndarray) -> np.ndarray:
     """Return depth attribute: 0 for surface (boundary) vertices, 1 for interior.
 
@@ -78,13 +122,13 @@ def _surface_depth(num_verts: int, boundary_tris: np.ndarray) -> np.ndarray:
 
 def _write_ply(filepath: Path, verts: np.ndarray, tris: np.ndarray,
                depth: np.ndarray) -> None:
-    """Write an ASCII PLY file with x,y,z,depth vertex attributes and surface triangles.
+    """Write an ASCII PLY file with x,y,z,depth vertex attributes and triangles.
 
     Parameters
     ----------
     filepath : destination path (must have a .ply suffix)
     verts    : (N, 3) float64 vertex positions
-    tris     : (K, 3) int32 surface triangle indices
+    tris     : (K, 3) int32 triangle indices
     depth    : (N,) int32 per-vertex depth attribute (0=surface, 1=interior)
     """
     num_verts = len(verts)
@@ -107,13 +151,11 @@ def _write_ply(filepath: Path, verts: np.ndarray, tris: np.ndarray,
     header_lines.append("end_header")
     header = "\n".join(header_lines) + "\n"
 
-    # Build vertex block via numpy for speed.
     vert_buf = io.StringIO()
     np.savetxt(vert_buf, np.column_stack([verts, depth.astype(np.float64)]),
                fmt=["%.6g", "%.6g", "%.6g", "%d"])
     vertex_block = vert_buf.getvalue()
 
-    # Build face block.
     face_block = ""
     if num_tris > 0:
         face_buf = io.StringIO()
@@ -156,17 +198,17 @@ def _setup_ax(ax, verts: np.ndarray, elev: float, azim: float) -> None:
 def _render_surface(verts: np.ndarray, tris: np.ndarray,
                     title: str, out_path: Path,
                     draw_edges: bool = False) -> None:
-    """Render the boundary surface as a Phong-shaded PNG.
+    """Render the simplicial complex surface as a Phong-shaded PNG (no transparency).
 
     Uses matplotlib Poly3DCollection with back-face culling and ambient+diffuse
-    shading. When draw_edges=True a wireframe overlay is drawn on top of the
-    shaded faces, scaling edge width with the inverse of the triangle count so
-    edges remain clearly visible at coarse levels.
+    shading.  All faces are fully opaque (alpha=1).  When draw_edges=True an
+    opaque wireframe overlay is drawn, scaling edge width with the inverse of
+    the triangle count so edges remain clearly visible at coarse levels.
 
     Parameters
     ----------
     verts      : (N, 3) float64 vertex positions
-    tris       : (K, 3) int32 boundary triangle indices
+    tris       : (K, 3) int32 triangle indices
     title      : figure title string
     out_path   : destination PNG path
     draw_edges : if True, overlay wireframe edges on the shaded surface
@@ -198,14 +240,11 @@ def _render_surface(verts: np.ndarray, tris: np.ndarray,
         dot = normals @ light
         front = dot > 0.0
 
-        # Face alpha: slightly more transparent when edges will be drawn so
-        # the wireframe stands out clearly.
-        face_alpha = 0.80 if draw_edges else 0.95
-
         if np.any(front):
             shading = np.clip(0.35 + 0.65 * dot[front], 0.2, 1.0)
             face_rgb = shading[:, None] * BASE_COLOR
-            rgba = np.column_stack([face_rgb, np.full(len(shading), face_alpha)])
+            # Fully opaque: alpha = 1.0
+            rgba = np.column_stack([face_rgb, np.ones(len(shading))])
 
             tri_verts = np.stack([v0[front], v1[front], v2[front]], axis=1)
             poly = Poly3DCollection(tri_verts)
@@ -214,21 +253,21 @@ def _render_surface(verts: np.ndarray, tris: np.ndarray,
             ax.add_collection3d(poly)
 
         if draw_edges:
-            # Collect unique edges from ALL surface triangles (not just front-
-            # facing) so silhouette and back edges are also visible.
+            # Collect unique edges from ALL triangles (not just front-facing)
+            # so silhouette and back edges are visible too.
             edge_set: set[tuple[int, int]] = set()
             for tri in tris:
                 for k in range(3):
                     e = (int(tri[k]), int(tri[(k + 1) % 3]))
                     edge_set.add(e if e[0] < e[1] else (e[1], e[0]))
 
-            # Scale line width inversely with triangle count:
-            # few triangles (coarse) → thick, clearly visible edges;
-            # many triangles (dense) → thin, uncluttered lines.
+            # Scale line width inversely with triangle count: few triangles at
+            # coarse levels get thick, clearly visible edges.
             lw = max(0.4, min(2.0, 300.0 / max(len(tris), 1)))
             edge_segs = [[verts[a], verts[b]] for a, b in edge_set]
+            # Fully opaque edges.
             lc = Line3DCollection(edge_segs, linewidths=lw,
-                                   colors=[[0.08, 0.15, 0.25]], alpha=0.6)
+                                   colors=[[0.08, 0.15, 0.25]])
             ax.add_collection3d(lc)
 
     _setup_ax(ax, verts, ELEV, AZIM)
@@ -238,91 +277,28 @@ def _render_surface(verts: np.ndarray, tris: np.ndarray,
     fig.savefig(out_path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
-def _coarse_surface_triangles(coarse_verts: np.ndarray) -> np.ndarray:
-    """Triangulate the exterior surface of a coarse hierarchy level.
-
-    For each pair of axis-aligned faces of the bounding box, collects all
-    coarse vertices that lie on that face (within a small tolerance) and
-    triangulates them with 2D Delaunay in the projected plane. This gives a
-    complete, hole-free surface triangulation that includes all coarse vertices
-    on each face — unlike a 3D convex hull, which drops coplanar interior
-    points on flat faces.
-
-    Triangle winding is corrected so all face normals point outward.
-
-    Parameters
-    ----------
-    coarse_verts : (N, 3) float64 coarse vertex positions
-
-    Returns
-    -------
-    (K, 3) int32 array of outward-facing triangle vertex indices
-    """
-    from scipy.spatial import Delaunay
-
-    if len(coarse_verts) < 3:
-        return np.zeros((0, 3), dtype=np.int32)
-
-    mn = coarse_verts.min(axis=0)
-    mx = coarse_verts.max(axis=0)
-    extent = mx - mn
-    if extent.min() < 1e-10:
-        return np.zeros((0, 3), dtype=np.int32)
-
-    # Face membership tolerance: 4% of the smallest bounding-box dimension.
-    eps = extent.min() * 0.04
-    center = (mn + mx) / 2.0
-    all_tris: list[np.ndarray] = []
-
-    for axis in range(3):
-        other = [i for i in range(3) if i != axis]
-        for side_val in [mn[axis], mx[axis]]:
-            face_mask = np.abs(coarse_verts[:, axis] - side_val) < eps
-            face_idx = np.where(face_mask)[0]
-            if len(face_idx) < 3:
-                continue
-
-            pts_2d = coarse_verts[face_idx][:, other]
-            # Guard against degenerate 2D point sets.
-            if np.linalg.matrix_rank(pts_2d - pts_2d[0]) < 2:
-                continue
-            try:
-                d = Delaunay(pts_2d)
-            except Exception:
-                continue
-
-            tri_global = face_idx[d.simplices].copy()  # (K, 3) global indices
-
-            # Correct winding to outward-facing.
-            for k in range(len(tri_global)):
-                v0 = coarse_verts[tri_global[k, 0]]
-                v1 = coarse_verts[tri_global[k, 1]]
-                v2 = coarse_verts[tri_global[k, 2]]
-                n = np.cross(v1 - v0, v2 - v0)
-                fc = (v0 + v1 + v2) / 3.0
-                if n.dot(fc - center) < 0:
-                    tri_global[k, 1], tri_global[k, 2] = tri_global[k, 2], tri_global[k, 1]
-            all_tris.append(tri_global)
-
-    if not all_tris:
-        return np.zeros((0, 3), dtype=np.int32)
-    return np.vstack(all_tris).astype(np.int32)
-
-
 
 def save_hierarchy_meshes(solver: Any, output_dir: Path) -> list[Path]:
     """Export each hierarchy level as a PLY mesh file and a PNG render.
 
+    Both the PLY and the PNG use the actual simplicial complex triangles:
+      - Level 0: exterior surface of the fine manifold tet mesh (faces
+                 appearing exactly once in the tet connectivity).
+      - Level i > 0: boundary faces of the coarse tet sub-complex UNION the
+                     free triangles (2-simplices not part of any tetrahedron)
+                     stored in solver.all_tris[i-1].
+
     For each level i the following files are written to output_dir/meshes/:
-      - level_{i}.ply   ASCII PLY: all vertices with depth attribute (0=surface,
-                        1=interior) and the extracted surface triangles.
-      - level_{i}.png   Phong-shaded surface render. Level 0 shows smooth shaded
-                        faces; coarser levels additionally overlay a wireframe so
-                        the triangle resolution and coarsening are clearly visible.
+      - level_{i}.ply   ASCII PLY: all vertices (with depth attribute 0=surface,
+                        1=interior) + all simplicial complex triangles.
+      - level_{i}.png   Phong-shaded surface render, fully opaque.  Level 0
+                        shows smooth shading; coarser levels additionally
+                        overlay an opaque wireframe so the coarsening is visible.
 
     Parameters
     ----------
-    solver     : GravoTet C++ solver object exposing all_vertices / all_tetrahedra.
+    solver     : GravoTet C++ solver object exposing all_vertices,
+                 all_tetrahedra, all_tris, all_P, nr_points.
     output_dir : root output directory; a ``meshes/`` subdirectory is created.
 
     Returns
@@ -333,47 +309,45 @@ def save_hierarchy_meshes(solver: Any, output_dir: Path) -> list[Path]:
     mesh_dir.mkdir(parents=True, exist_ok=True)
 
     n_levels = len(solver.all_vertices)
-    ply_paths: list[Path] = []
 
-    # Fine-level boundary triangles (used for level-0 render and PLY depth).
-    fine_verts = np.asarray(solver.all_vertices[0], dtype=np.float64)
+    # Fine-level surface (manifold boundary of the input tet mesh).
     fine_tets = np.asarray(solver.all_tetrahedra[0], dtype=np.int32)
     fine_boundary_tris = _find_boundary_triangles(fine_tets)
+
+    # solver.all_tris[j] = free triangles for hierarchy level j+1.
+    coarse_free_tris = list(solver.all_tris) if hasattr(solver, "all_tris") else []
+
+    ply_paths: list[Path] = []
 
     for i in range(n_levels):
         verts = np.asarray(solver.all_vertices[i], dtype=np.float64)
         tets = np.asarray(solver.all_tetrahedra[i], dtype=np.int32)
 
-        # Boundary faces of the coarse tet complex (used for PLY depth attr).
-        boundary_tris = _find_boundary_triangles(tets) if i > 0 else fine_boundary_tris
-        depth = _surface_depth(len(verts), boundary_tris)
+        if i == 0:
+            surf_tris = fine_boundary_tris
+        else:
+            # Actual algorithm output: tet boundary faces + free triangles.
+            free = coarse_free_tris[i - 1] if i - 1 < len(coarse_free_tris) else []
+            surf_tris = _simplicial_complex_triangles(tets, free)
+
+        depth = _surface_depth(len(verts), surf_tris)
 
         # --- PLY ---
         ply_path = mesh_dir / f"level_{i}.ply"
-        _write_ply(ply_path, verts, boundary_tris, depth)
+        _write_ply(ply_path, verts, surf_tris, depth)
         ply_paths.append(ply_path)
 
         # --- PNG render ---
         if i == 0:
             level_label = "Level 0 (fine)"
         elif i == n_levels - 1:
-            level_label = f"Level {i} (coarse)"
+            level_label = f"Level {i} (coarsest)"
         else:
             level_label = f"Level {i}"
         title = f"{level_label}\n{len(verts):,} vertices"
         png_path = mesh_dir / f"level_{i}.png"
 
-        if i == 0:
-            # Fine level: all boundary faces form a clean manifold surface.
-            _render_surface(verts, fine_boundary_tris, title, png_path,
-                            draw_edges=False)
-        else:
-            # Coarse levels: convex hull of all coarse vertices gives a
-            # hole-free exterior surface triangulation. Interior coarse
-            # vertices are never on the convex hull for convex domains.
-            render_tris = _coarse_surface_triangles(verts)
-            _render_surface(verts, render_tris, title, png_path,
-                            draw_edges=True)
+        _render_surface(verts, surf_tris, title, png_path, draw_edges=(i > 0))
 
     return ply_paths
 
@@ -398,5 +372,5 @@ def save_prolongation_matrices(solver: Any, output_dir: Path) -> Path:
         arrays[f"P_{i}_indptr"] = P_csr.indptr.astype(np.int32)
         arrays[f"P_{i}_shape"] = np.array(P_csr.shape, dtype=np.int32)
 
-    np.savez_compressed(str(path), **arrays)
+    np.savez_compressed(path, **arrays)
     return path
