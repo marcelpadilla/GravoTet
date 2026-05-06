@@ -1,7 +1,8 @@
 """Build the supplementary `gravotet` C++ extension.
 
-Invoked from `gravotet_demo/`; sources live one directory up under `src/` with
-vendored Eigen headers under `deps/eigen/`. No SuiteSparse/CHOLMOD dependency.
+Invoked from `code/python/gravotet_demo/`; C++ sources live under `code/cpp/`
+with vendored Eigen headers under `code/deps/eigen/`. No SuiteSparse/CHOLMOD
+dependency.
 """
 
 from __future__ import annotations
@@ -12,10 +13,10 @@ from pathlib import Path
 from pybind11.setup_helpers import Pybind11Extension, build_ext
 from setuptools import setup
 
-HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
-SRC = ROOT / "src"
-EIGEN = ROOT / "deps" / "eigen"
+HERE = Path(__file__).resolve().parent  # code/python/gravotet_demo/
+CODE = HERE.parent.parent               # code/
+SRC = CODE / "cpp"
+EIGEN = CODE / "deps" / "eigen"
 
 if platform.system() == "Windows":
     extra_compile_args = ["/std:c++17", "/O2", "/EHsc", "/bigobj"]

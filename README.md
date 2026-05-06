@@ -71,31 +71,34 @@ installation is required — the supplement is intentionally self-contained.
 
 ```
 GravoTet/
-├── run_demo.py            ← single entry point (run this)
+├── run_demo.py            <- single entry point (run this)
 ├── README.md
 ├── THIRD_PARTY_LICENSES.md
-├── src/                   ← C++ hierarchy + V-cycle solver + pybind11 binding
-├── deps/eigen/            ← vendored Eigen headers
-└── gravotet_demo/         ← Python helpers and build scaffolding
-    ├── __init__.py
-    ├── pde.py             ← stiffness, mass, Poisson and biharmonic assembly
-    ├── solver.py          ← Ours hierarchy + V-cycle wrapper
-    ├── plotting.py        ← paper-style residual and timing figure
-    ├── setup.py           ← pybind11 build configuration
-    ├── requirements.txt   ← Python dependencies
-    └── test_cube_problems.py  ← optional smoke test
+└── code/
+    ├── cpp/               <- C++ hierarchy + V-cycle solver + pybind11 binding
+    ├── python/
+    │   └── gravotet_demo/ <- Python helpers and build scaffolding
+    │       ├── __init__.py
+    │       ├── pde.py     <- stiffness, mass, Poisson and biharmonic assembly
+    │       ├── solver.py  <- Ours hierarchy + V-cycle wrapper
+    │       ├── plotting.py    <- paper-style residual and timing figure
+    │       ├── setup.py       <- pybind11 build configuration
+    │       ├── requirements.txt   <- Python dependencies
+    │       └── test_cube_problems.py  <- optional smoke test
+    └── deps/
+        └── eigen/         <- vendored Eigen headers
 ```
 
 ## Relation to the paper
 
 | Paper concept | Source location |
 |---|---|
-| Ours hierarchy construction | [src/multigrid_solver.cpp](src/multigrid_solver.cpp) |
-| V-cycle solver and Galerkin coarse operators | [src/multigrid_solver_vcycle.cpp](src/multigrid_solver_vcycle.cpp) |
-| Python binding | [src/gravotet_binding.cpp](src/gravotet_binding.cpp) |
-| Stiffness `S`, lumped mass `M`, biharmonic `S M⁻¹ S` | [gravotet_demo/pde.py](gravotet_demo/pde.py) |
-| Build hierarchy once, reuse for both PDEs | [gravotet_demo/solver.py](gravotet_demo/solver.py) |
-| Paper-style residual and timing plot | [gravotet_demo/plotting.py](gravotet_demo/plotting.py) |
+| Ours hierarchy construction | [code/cpp/multigrid_solver.cpp](code/cpp/multigrid_solver.cpp) |
+| V-cycle solver and Galerkin coarse operators | [code/cpp/multigrid_solver_vcycle.cpp](code/cpp/multigrid_solver_vcycle.cpp) |
+| Python binding | [code/cpp/gravotet_binding.cpp](code/cpp/gravotet_binding.cpp) |
+| Stiffness `S`, lumped mass `M`, biharmonic `S M-1 S` | [code/python/gravotet_demo/pde.py](code/python/gravotet_demo/pde.py) |
+| Build hierarchy once, reuse for both PDEs | [code/python/gravotet_demo/solver.py](code/python/gravotet_demo/solver.py) |
+| Paper-style residual and timing plot | [code/python/gravotet_demo/plotting.py](code/python/gravotet_demo/plotting.py) |
 | End-to-end driver | [run_demo.py](run_demo.py) |
 
 The supplement is intentionally limited to the Ours method and to the
@@ -114,5 +117,5 @@ verification thresholds.
 
 ## Third-party code
 
-This repository vendors the Eigen headers in [deps/eigen](deps/eigen). See
+This repository vendors the Eigen headers in [code/deps/eigen](code/deps/eigen). See
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for license terms.

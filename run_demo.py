@@ -27,8 +27,9 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent
-PKG = ROOT / "gravotet_demo"
-SRC = ROOT / "src"
+CODE = ROOT / "code"
+PKG = CODE / "python" / "gravotet_demo"
+SRC = CODE / "cpp"
 MIN_PY, MAX_PY = (3, 8), (3, 13)
 REQUIRED = ("numpy", "scipy", "matplotlib", "pybind11")
 
@@ -110,7 +111,8 @@ def _build_extension() -> None:
 
 
 def _ensure_extension() -> Any:
-    sys.path.insert(0, str(PKG))
+    sys.path.insert(0, str(PKG.parent))  # for gravotet_demo package
+    sys.path.insert(0, str(PKG))          # for gravotet C++ extension
     if _needs_rebuild():
         _build_extension()
     importlib.invalidate_caches()
