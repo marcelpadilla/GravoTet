@@ -6,10 +6,10 @@ Saves the multigrid hierarchy produced by the C++ solver to disk:
                                     complex triangles (tet boundary faces + free
                                     triangles from allTris).  This matches the full
                                     algorithm output and loads correctly in Blender.
-  - output/meshes/level_{i}.png  -- Phong-shaded surface render using nearest-coarse-
+  - output/meshes/level_{i}.png  -- pyvista offscreen render using nearest-coarse-
                                     vertex mapping of the fine surface triangles.
-                                    This gives a clean, hole-free exterior at every
-                                    coarsening level suitable for matplotlib rendering.
+                                    Proper Z-buffer rendering; no painter's-algorithm
+                                    artifacts.  Hole-free at every coarsening level.
   - output/prolongations.npz     -- all prolongation operators in CSR format
 
 Render strategy (PNG only):
@@ -25,8 +25,9 @@ Render strategy (PNG only):
   This produces a complete, hole-free exterior surface representation at every level.
   The coarsening density is clearly visible: dense at level 1, sparse at level 4.
 
-  All faces are rendered with both-side shading (no back-face culling) to prevent
-  winding-order artifacts producing apparent holes.  All rendering is fully opaque.
+  pyvista renders the scene offscreen with a proper Z-buffer so depth ordering
+  is correct regardless of face count or camera angle.  All rendering is fully
+  opaque.
 
 PLY strategy:
   PLY files contain the actual algorithm output: tet boundary faces UNION free
@@ -230,107 +231,54 @@ def _write_ply(filepath: Path, verts: np.ndarray, tris: np.ndarray,
 # Render helpers
 # ---------------------------------------------------------------------------
 
-def _setup_ax(ax, verts: np.ndarray, elev: float, azim: float) -> None:
-    """Apply a consistent clean style and view to a 3-D matplotlib axis."""
-    if len(verts) > 0:
-        mn, mx = verts.min(axis=0), verts.max(axis=0)
-        c = (mn + mx) / 2.0
-        r = max((mx - mn).max() * 0.55, 1e-3)
-        ax.set_xlim(c[0] - r, c[0] + r)
-        ax.set_ylim(c[1] - r, c[1] + r)
-        ax.set_zlim(c[2] - r, c[2] + r)
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_zticks([])
-    ax.set_xlabel("")
-    ax.set_ylabel("")
-    ax.set_zlabel("")
-    ax.xaxis.pane.fill = False
-    ax.yaxis.pane.fill = False
-    ax.zaxis.pane.fill = False
-    ax.xaxis.pane.set_edgecolor("lightgray")
-    ax.yaxis.pane.set_edgecolor("lightgray")
-    ax.zaxis.pane.set_edgecolor("lightgray")
-    ax.view_init(elev=elev, azim=azim)
-
-
 def _render_surface(verts: np.ndarray, tris: np.ndarray,
                     title: str, out_path: Path,
                     draw_edges: bool = False) -> None:
-    """Render a surface as a Phong-shaded PNG.  Fully opaque, no back-face culling.
+    """Render a surface mesh to a PNG using pyvista (proper Z-buffer rendering).
 
-    Renders ALL triangles regardless of winding direction (both front and back
-    faces).  Back faces receive the same shading formula applied to the flipped
-    normal.  This avoids apparent holes caused by winding-order artifacts, which
-    are common in coarse non-manifold simplicial complexes.
-
-    When draw_edges=True an opaque wireframe overlay is drawn.  Edge width scales
-    inversely with triangle count so edges remain legible at every resolution.
+    pyvista renders offscreen via VTK so depth ordering is always correct —
+    no painter's-algorithm artifacts regardless of face count or camera angle.
 
     Parameters
     ----------
     verts      : (N, 3) float64 vertex positions
     tris       : (K, 3) int32 triangle indices
-    title      : figure title string
+    title      : text label drawn at the top of the image
     out_path   : destination PNG path
-    draw_edges : if True, overlay wireframe edges on the shaded surface
+    draw_edges : if True, draw a wireframe edge overlay on the shaded surface
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
+    import pyvista as pv
 
-    ELEV, AZIM = 25.0, 45.0
-    BASE_COLOR = np.array([0.27, 0.51, 0.71])  # steel blue
-
-    fig = plt.figure(figsize=(5, 5), dpi=150)
-    ax = fig.add_subplot(111, projection="3d")
+    pl = pv.Plotter(off_screen=True, window_size=[750, 750])
+    pl.background_color = "white"
 
     if len(tris) > 0 and len(verts) > 0:
-        ae, aa = np.radians(ELEV), np.radians(AZIM)
-        light = np.array([np.cos(ae) * np.cos(aa),
-                          np.cos(ae) * np.sin(aa),
-                          np.sin(ae)])
+        # pyvista face format: [3, i0, i1, i2, 3, i0, i1, i2, ...]
+        faces_pv = np.hstack(
+            [np.full((len(tris), 1), 3, dtype=np.int_), tris]
+        ).ravel()
+        mesh = pv.PolyData(verts.astype(np.float32), faces_pv)
 
-        v0, v1, v2 = verts[tris[:, 0]], verts[tris[:, 1]], verts[tris[:, 2]]
+        lw = max(0.5, min(3.0, 300.0 / max(len(tris), 1)))
+        pl.add_mesh(
+            mesh,
+            color="#4582B5",       # steel blue
+            show_edges=draw_edges,
+            edge_color="#141F3F",  # dark navy
+            line_width=lw,
+            lighting=True,
+            smooth_shading=False,
+        )
 
-        normals = np.cross(v1 - v0, v2 - v0)
-        norms = np.linalg.norm(normals, axis=1, keepdims=True)
-        norms[norms < 1e-14] = 1.0
-        normals /= norms
+    # Isometric-ish view: elevation 25 deg, azimuth 45 deg.
+    pl.camera_position = "iso"
+    pl.camera.azimuth = -15
+    pl.camera.elevation = 10
+    pl.camera.zoom(0.9)
 
-        # Use abs(dot) so back faces and front faces both receive positive
-        # shading — eliminates holes from winding-order errors.
-        dot = np.abs(normals @ light)
-        shading = np.clip(0.35 + 0.65 * dot, 0.2, 1.0)
-        face_rgb = shading[:, None] * BASE_COLOR
-        rgba = np.column_stack([face_rgb, np.ones(len(shading))])  # alpha = 1
-
-        tri_verts = np.stack([v0, v1, v2], axis=1)
-        poly = Poly3DCollection(tri_verts)
-        poly.set_facecolor(rgba.tolist())
-        poly.set_edgecolor("none")
-        ax.add_collection3d(poly)
-
-        if draw_edges:
-            edge_set: set[tuple[int, int]] = set()
-            for tri in tris:
-                for k in range(3):
-                    e = (int(tri[k]), int(tri[(k + 1) % 3]))
-                    edge_set.add(e if e[0] < e[1] else (e[1], e[0]))
-
-            lw = max(0.4, min(2.0, 300.0 / max(len(tris), 1)))
-            edge_segs = [[verts[a], verts[b]] for a, b in edge_set]
-            lc = Line3DCollection(edge_segs, linewidths=lw,
-                                   colors=[[0.08, 0.15, 0.25]])
-            ax.add_collection3d(lc)
-
-    _setup_ax(ax, verts, ELEV, AZIM)
-    ax.set_title(title, fontsize=11, pad=8)
-    fig.patch.set_facecolor("white")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
+    pl.add_text(title, position="upper_edge", font_size=10, color="black")
+    pl.screenshot(str(out_path), transparent_background=False)
+    pl.close()
 
 
 # ---------------------------------------------------------------------------
