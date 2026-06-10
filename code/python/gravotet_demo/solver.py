@@ -48,7 +48,6 @@ def solve_problem(solver: Any, problem: ProblemData, max_cycles: int = 150) -> d
         post_sweeps=2,
         tol=problem.tolerance,
         timeout_ms=0.0,
-        smoother="jacobi",
         jacobi_omega=0.6667,
         collect_timing=True,
         mass_diag_inv=np.array([], dtype=np.float64),

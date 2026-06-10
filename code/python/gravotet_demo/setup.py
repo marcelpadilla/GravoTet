@@ -19,10 +19,12 @@ SRC = CODE / "cpp"
 EIGEN = CODE / "deps" / "eigen"
 
 if platform.system() == "Windows":
-    extra_compile_args = ["/std:c++17", "/O2", "/EHsc", "/bigobj"]
+    # /GL- disables LTCG whole-program optimisation injected by the Python
+    # build machinery, which triggers an MSVC 14.44 ICE on Eigen sparse templates.
+    extra_compile_args = ["/O2", "/EHsc", "/bigobj", "/GL-"]
     extra_link_args: list[str] = []
 else:
-    extra_compile_args = ["-std=c++17", "-O3", "-fPIC"]
+    extra_compile_args = ["-O3", "-fPIC"]
     extra_link_args = []
     if platform.system() == "Darwin":
         extra_compile_args.append("-mmacosx-version-min=10.15")
@@ -42,6 +44,7 @@ ext_modules = [
         extra_compile_args=extra_compile_args,
         extra_link_args=extra_link_args,
         define_macros=[("VERSION_INFO", PACKAGE_VERSION)],
+        cxx_std=17,
         language="c++",
     )
 ]

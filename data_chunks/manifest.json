@@ -1,0 +1,27 @@
+{
+  "spot": {
+    "filename": "spot.ply",
+    "size": 148921976,
+    "parts": [
+      "spot.ply.part000",
+      "spot.ply.part001"
+    ]
+  },
+  "sphere": {
+    "filename": "sphere_1.5M.ply",
+    "size": 168811020,
+    "parts": [
+      "sphere_1.5M.ply.part000",
+      "sphere_1.5M.ply.part001"
+    ]
+  },
+  "torus": {
+    "filename": "torus_2M.ply",
+    "size": 230821897,
+    "parts": [
+      "torus_2M.ply.part000",
+      "torus_2M.ply.part001",
+      "torus_2M.ply.part002"
+    ]
+  }
+}

@@ -88,9 +88,6 @@ namespace GravoMG {
 		
 
 
-		// Load tetrahedral mesh from PLY format
-		static TetrahedralMesh loadFromPLY(const std::string& filename);
-
 		// Generate a cube tetrahedral mesh with N subdivisions per axis
 		static TetrahedralMesh generateCubeMesh(int resolution);
 
@@ -104,66 +101,25 @@ namespace GravoMG {
 		
 		// Clear all hierarchy data (reset the solver)
 		void clearHierarchy();
-		
-		// Compute exterior visualization data on-demand (lazy computation)
-		// This is called when visualization requests exterior data for featurePreserve=false mode.
-		// For featurePreserve=true, data is already populated during hierarchy construction.
-		// Returns true if data was computed/available, false otherwise.
-		bool computeExteriorVisualizationData();
-		
+
 		// Get the number of levels in the hierarchy (1 = only finest level, no coarsening)
 		int numLevels() const { return static_cast<int>(all_vertices.size()); }
 		
 		// Check if hierarchy has been built
 		bool isHierarchyBuilt() const { return !all_vertices.empty(); }
 
-		// Compute Galerkin coarse operators (R * A * P) for all levels.
-		// Takes the fine level matrix A (level 0) and returns the list of coarse matrices.
-		// Returns a vector where result[i] is the operator for level i+1.
-        std::vector<Eigen::SparseMatrix<double>> computeCoarseOperators(
-			const Eigen::SparseMatrix<double>& A_fine
-        );
-
-		// Compute RAP product (R * A * P) using optimized parallel implementation
+		// Galerkin coarse-operator product R * A * P, used internally to assemble
+		// the operator hierarchy A_l = P_l^T A_{l-1} P_l in buildVCycleHierarchy.
 		static Eigen::SparseMatrix<double> computeProductRAP(
 			const Eigen::SparseMatrix<double>& R,
 			const Eigen::SparseMatrix<double>& A,
 			const Eigen::SparseMatrix<double>& P
 		);
 
-        // Perform Gauss-Seidel smoothing iterations in C++ (much faster setup than Python SPLU)
-        // Computes x_new = GS(A, b, x_old)
-        // Iterates: x_i = (b_i - sum_{j!=i} A_ij * x_j) / A_ii
-        // Assumes A is CSR. Returns the updated x.
-        Eigen::VectorXd computeGaussSeidel(
-            const Eigen::SparseMatrix<double>& A,
-            const Eigen::VectorXd& b,
-            const Eigen::VectorXd& x,
-            const int iterations,
-            const bool sweep_backward = false,
-            const bool symmetric = false
-        );
-        
-        // Overload for Row-Major matrices (used in internal V-cycle)
-        Eigen::VectorXd computeGaussSeidel(
-            const SparseMatrixCSR& A,
-            const Eigen::VectorXd& b,
-            const Eigen::VectorXd& x,
-            const int iterations,
-            const bool sweep_backward = false,
-            const bool symmetric = false
-        );
-
         // ========================================================================
         // V-CYCLE SOLVER - Full multigrid solve in C++
         // ========================================================================
-        
-        // Smoother type enumeration (extensible for future smoothers)
-        enum class SmootherType {
-            JACOBI,
-            GAUSS_SEIDEL
-        };
-        
+
         // V-Cycle solve result structure
         struct VCycleSolveResult {
             Eigen::VectorXd x;              // Solution vector
@@ -183,36 +139,13 @@ namespace GravoMG {
             std::string coarse_solver_name;
         };
         
-        // Perform damped Jacobi smoothing iterations
-        // x_new = x + omega * D^{-1} * (b - A*x)
-        // Extensible design: matches signature of computeGaussSeidel
-        Eigen::VectorXd computeJacobi(
-            const Eigen::SparseMatrix<double>& A,
-            const Eigen::VectorXd& b,
-            const Eigen::VectorXd& x,
-            int iterations,
-            double omega = 0.6667
-        );
-        
         // Build V-cycle hierarchy (operators and factorize coarse solver)
         // Must be called before solveVCycle
         // Returns true if hierarchy was successfully built
 		bool buildVCycleHierarchy(const Eigen::SparseMatrix<double>& A_fine);
-        
-		// Set external prolongation operators for the V-cycle solver.
-		// When set, buildVCycleHierarchy will use these instead of the internal hierarchy.
-        void setExternalProlongations(
-            const std::vector<Eigen::SparseMatrix<double>>& prolongations
-        );
-        
-        // Clear external prolongations (revert to using internal hierarchy)
-        void clearExternalProlongations();
-        
-        // Check if external prolongations are set
-        bool hasExternalProlongations() const { return use_external_prolongations_; }
-        
-        // Solve Ax = b using V-cycle multigrid
-        // Requires buildVCycleHierarchy to have been called first
+
+        // Solve Ax = b using V-cycle multigrid with Chebyshev-accelerated
+        // damped Jacobi smoothing.  Requires buildVCycleHierarchy first.
         VCycleSolveResult solveVCycle(
             const Eigen::VectorXd& b,
             const Eigen::VectorXd& x0,
@@ -221,7 +154,6 @@ namespace GravoMG {
             int post_sweeps = 2,
             double tol = 1e-6,
             double timeout_ms = 0.0,
-            SmootherType smoother = SmootherType::JACOBI,
             double jacobi_omega = 0.6667,
             bool collect_timing = false,
             const Eigen::VectorXd& mass_diag_inv = Eigen::VectorXd()
@@ -289,7 +221,7 @@ namespace GravoMG {
 		struct BenchmarkData {
 			// --- Init phase (everything before the coarsening loop) ---
 			double init_ms = 0.0;                        // clearHierarchy + adjacency build + push level 0 + loop var init
-			double init_exterior_extraction_ms = 0.0;     // buildExteriorGraphNEWALT (ours_surf/feat/pro only)
+			double init_exterior_extraction_ms = 0.0;     // buildExteriorGraph: solid-angle classification + dihedral feature
 
 			// --- Per-level coarsening loop ---
 			std::vector<double> level_sampling_ms;
@@ -321,23 +253,6 @@ namespace GravoMG {
 			const Eigen::MatrixXd& verts,
 			const Eigen::MatrixXi& neigh
 		);
-
-		// Fast disk sampling (matches reference implementation)
-		// Returns indices of sampled vertices
-		// - pos:				Vertex positions (Nx3 matrix)
-		// - edges:				Neighborhood matrix (NxX matrix, -1 indicates no more neighbors)
-		// - radius:			Sampling radius
-		// - shortestDistanceToSample:	Output: shortest distance to nearest sample for each vertex
-		// - nearestSourceK:	Output: index of nearest sample for each vertex
-	       std::vector<int> fastDiskSample_exterior(
-		       const Eigen::MatrixXd& pos,
-		       const Eigen::MatrixXi& edges,
-		       const double& radius,
-		       Eigen::VectorXd& shortestDistanceToSample,
-		       std::vector<size_t>& nearestSourceK,
-		       Eigen::MatrixXd& sampledVertices
-	       );
-
 
 		// Construct clusters using Dijkstra's algorithm (works for any neighbor matrix)
 		// Assigns each point to its nearest sample point based on geodesic distance
@@ -421,22 +336,19 @@ namespace GravoMG {
 		);
 
 
-		// Compute boundary vertices AND surface triangles from tetrahedral mesh
-		std::vector<int> computeBoundaryVertices(const TetrahedralMesh& mesh, Eigen::MatrixXi& surfaceTriangles);
-		
 		// =======================================================================
 		// SOLID ANGLE APPROACH FOR EXTERIOR/INTERIOR CLASSIFICATION
 		// =======================================================================
 		// Computes exterior (boundary) vertices using solid angle sum at each vertex.
 		// For each vertex, sums the solid angles of all incident tetrahedra.
-		// - If sum ≈ 4π: interior vertex (fully enclosed)
-		// - If sum < 4π: exterior vertex (on boundary)  
+		// - If sum approx 4pi: interior vertex (fully enclosed)
+		// - If sum < 4pi: exterior vertex (on boundary)  
 		// - If no tets: exterior vertex (isolated)
 		// Also returns the solid angle sum for each vertex (useful for feature sorting).
 		//
 		// @param mesh          Tetrahedral mesh
 		// @param solidAngleSums Output: solid angle sum for each vertex (size = numVertices)
-		// @param threshold     Fraction of 4π below which a vertex is considered exterior (default 0.99)
+		// @param threshold     Fraction of 4pi below which a vertex is considered exterior (default 0.99)
 		// @return              Indices of exterior vertices, sorted by solid angle sum (ascending = sharpest first)
 		std::vector<int> computeExteriorVerticesBySolidAngle(
 			const TetrahedralMesh& mesh,
@@ -448,7 +360,7 @@ namespace GravoMG {
 		// The solid angle is the area on a unit sphere subtended by the tetrahedron at that vertex
 		// @param v0 The vertex position at which to compute the solid angle
 		// @param v1, v2, v3 The other three vertices of the tetrahedron
-		// @return Solid angle in steradians (0 to 2π for a valid tet corner)
+		// @return Solid angle in steradians (0 to 2pi for a valid tet corner)
 		static double computeTetSolidAngle(
 			const Eigen::RowVector3d& v0,
 			const Eigen::RowVector3d& v1,
@@ -461,12 +373,12 @@ namespace GravoMG {
 		// Algorithm:
 		//   1. Classify exterior vertices via solid angle sum (parallel, per-tet)
 		//   2. Identify exterior edges from the neighbour matrix (both endpoints exterior)
-		//      and filter using dihedral angle sum around each edge (< 2π = exterior)
+		//      and filter using dihedral angle sum around each edge (< 2pi = exterior)
 		//   3. Compute per-vertex feature: for each exterior edge, find the two
 		//      triangular faces via shared exterior neighbours, compute normal angle.
 		// All phases are fully parallelizable with no hash maps.
 		// Populates: allExteriorVertices, allExteriorNeigh, allExteriorFeature
-		void buildExteriorGraphNEWALT();
+		void buildExteriorGraph();
 		
 		// Compute dihedral angle at an edge in a tetrahedron
 		// The dihedral angle is the angle between the projections of the two
@@ -571,13 +483,6 @@ namespace GravoMG {
 			const std::vector<int>& indices
 		);
 
-		// Export sparse matrix in Matrix Market format (.mtx)
-		// This format is widely supported and can be read by scipy.io.mmread() in Python
-		static void exportSparseMatrix(
-			const Eigen::SparseMatrix<double>& matrix,
-			const std::string& filename
-		);
-
 	private:
         // ========================================================================
         // V-CYCLE SOLVER PRIVATE MEMBERS
@@ -602,78 +507,35 @@ namespace GravoMG {
         std::unique_ptr<Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>>> coarse_solver_;
         // Dense coarse solver (optional, for small coarsest levels)
         std::unique_ptr<Eigen::LDLT<Eigen::MatrixXd>> dense_coarse_solver_;
-        Eigen::MatrixXd dense_coarse_matrix_;  // stored for debugging/info only
+        Eigen::MatrixXd dense_coarse_matrix_;  // backing storage for the dense LDLT factorization
         bool coarse_solver_valid_ = false;
         std::string coarse_solver_name_ = "SimplicialLDLT";
-        
+
         // V-cycle hierarchy state
         bool vcycle_hierarchy_built_ = false;
         int vcycle_num_levels_ = 0;
-        
-		// External prolongation support
-        bool use_external_prolongations_ = false;
-        std::vector<Eigen::SparseMatrix<double>> external_prolongations_;
-        
-        // Jacobi damping parameter
+
+        // Jacobi damping parameter (used as fallback once Chebyshev sweeps are exhausted)
         double jacobi_omega_ = 0.6667;
-        
-        // Chebyshev polynomial acceleration parameters (one per level except coarsest)
-        // Pre-computed spectral radius estimates (λ_max of D^{-1}A)
-        std::vector<double> vcycle_spectral_radius_;
-        // Pre-computed Chebyshev omega coefficients per level (omega[s] for sweep s)
+
+        // Chebyshev-accelerated Jacobi: per-level omega coefficients
+        // (one vector per level except the coarsest, length = chebyshev_degree_).
         std::vector<std::vector<double>> vcycle_chebyshev_omega_;
-        // Number of sweeps used for Chebyshev coefficient computation
+        // Number of leading sweeps that use Chebyshev omegas; remaining sweeps
+        // fall back to the fixed jacobi_omega_.
         int chebyshev_degree_ = 2;
 
-        
-        // Internal V-cycle recursive function
+        // Internal V-cycle recursive function.
         Eigen::VectorXd vcycleRecursive(
             int level,
             const Eigen::VectorXd& x,
             const Eigen::VectorXd& b,
             int pre_sweeps,
             int post_sweeps,
-            SmootherType smoother,
             bool collect_timing,
             VCycleSolveResult& timing
         );
 	};
-
-	// ============================================================================
-	// Standalone Direct Solve (free function, no multigrid hierarchy needed)
-	// ============================================================================
-
-	/**
-	 * @brief Result of a standalone direct solve via Eigen.
-	 */
-	struct DirectSolveResult {
-		Eigen::VectorXd x;           ///< Solution vector
-		double analyze_time_ms;       ///< Symbolic analysis / fill-reducing ordering
-		double factorize_time_ms;     ///< Numerical factorization
-		double solve_time_ms;         ///< Forward/back substitution
-		double total_time_ms;         ///< Wall-clock total
-		std::string solver_name;      ///< Human-readable solver name
-		bool success;                 ///< True if solve completed without error
-		std::string error;            ///< Error message if !success
-	};
-
-	/**
-	 * @brief Solve Ax = b using a standalone Eigen direct solver.
-	 *
-	 * Supports solver_type:
-	 *   - "eigen-llt"  : Eigen SimplicialLLT (Cholesky LL^T, AMD ordering)
-	 *   - "eigen-ldlt" : Eigen SimplicialLDLT (Cholesky LDL^T, AMD ordering)
-	 *
-	 * @param A  Sparse SPD matrix (ColMajor)
-	 * @param b  Right-hand side vector
-	 * @param solver_type  One of the supported solver type strings
-	 * @return DirectSolveResult with solution, timing breakdown, and status
-	 */
-	DirectSolveResult solveDirectEigen(
-		const Eigen::SparseMatrix<double>& A,
-		const Eigen::VectorXd& b,
-		const std::string& solver_type
-	);
 
 }
 

@@ -6,7 +6,7 @@ vendored deps are left untouched.
 
 Run from the repository root or from this directory:
 
-    python .scripts/reset.py
+    python scripts/reset.py
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ def main() -> None:
         print("  skipped  (none found)")
 
     print("\nDone. Repository is in a clean state.")
-    print("Run  python run_demo.py  to rebuild and re-run the demo.")
+    print("Run  python run_demo_cube_200k.py  to rebuild and re-run a demo.")
 
 
 if __name__ == "__main__":

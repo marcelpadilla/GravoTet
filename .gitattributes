@@ -1,0 +1,8 @@
+# The mesh-data parts under data_chunks/ are raw binary slices of .ply files.
+# core.autocrlf must never touch them: any LF<->CRLF rewrite would corrupt the
+# bytes and break reassembly. Mark them (and other binary assets) as binary so
+# git applies no end-of-line or filter conversion.
+data_chunks/** binary
+*.ply binary
+*.png binary
+*.pdf binary

@@ -4,9 +4,8 @@
  *
  * Contains all solve-phase logic for the TetMultigridSolver class:
  *   - Galerkin coarse operator construction (R*A*P)
- *   - Gauss-Seidel and Jacobi smoothers
+ *   - Chebyshev-accelerated damped Jacobi smoothing
  *   - V-cycle hierarchy build and recursive solve
- *   - External prolongation support
  *
  * The hierarchy *construction* (sampling, clustering, prolongation assembly)
  * lives in multigrid_solver.cpp.  This file only consumes the prolongation
@@ -29,54 +28,6 @@
 // =================================================================================================
 // Coarse Operator Construction
 // =================================================================================================
-
-std::vector<Eigen::SparseMatrix<double>>
-GravoMG::TetMultigridSolver::computeCoarseOperators(
-    const Eigen::SparseMatrix<double> &A_fine) {
-  std::vector<Eigen::SparseMatrix<double>> coarse_ops;
-  const auto &prols = this->allP;
-
-  if (prols.empty()) {
-    return coarse_ops;
-  }
-
-  Eigen::SparseMatrix<double> A_current = A_fine;
-
-  if (this->verbose) {
-    std::cout << "[CPP] Computing coarse operators for " << prols.size()
-              << " levels..." << std::endl;
-  }
-
-  for (size_t i = 0; i < prols.size(); ++i) {
-    const auto &P = prols[i];
-
-    if (this->verbose) {
-      std::cout << "  [CPP] Level " << i << " Shapes: A(" << A_current.rows()
-                << "x" << A_current.cols() << ", nnz=" << A_current.nonZeros()
-                << "), P(" << P.rows() << "x" << P.cols()
-                << ", nnz=" << P.nonZeros() << ")" << std::endl;
-    }
-
-    auto start = std::chrono::high_resolution_clock::now();
-
-    // Use static helper
-    Eigen::SparseMatrix<double> A_next =
-        computeProductRAP(P.transpose(), A_current, P);
-
-    auto end = std::chrono::high_resolution_clock::now();
-
-    if (this->verbose) {
-      std::chrono::duration<double, std::milli> t = end - start;
-      std::cout << "  [CPP] Timing: RAP = " << t.count()
-                << " ms. Next A nnz: " << A_next.nonZeros() << std::endl;
-    }
-
-    coarse_ops.push_back(A_next);
-    A_current = A_next;
-  }
-
-  return coarse_ops;
-}
 
 // Static helper for RAP product
 Eigen::SparseMatrix<double>
@@ -105,185 +56,22 @@ GravoMG::TetMultigridSolver::computeProductRAP(
 }
 
 // =================================================================================================
-// Gauss-Seidel Smoothers
-// =================================================================================================
-
-Eigen::VectorXd GravoMG::TetMultigridSolver::computeGaussSeidel(
-    const Eigen::SparseMatrix<double> &A, const Eigen::VectorXd &b,
-    const Eigen::VectorXd &x, const int iterations, const bool sweep_backward,
-    const bool symmetric) {
-  // x is the initial guess
-  Eigen::VectorXd x_curr = x;
-  int n = A.rows();
-
-  // Check dimensions
-  if (A.cols() != n || b.size() != n || x.size() != n) {
-    std::cerr << "[CPP] Error: Dimension mismatch in computeGaussSeidel"
-              << std::endl;
-    return x;
-  }
-
-  for (int iter = 0; iter < iterations; ++iter) {
-    // Forward Sweep
-    if (!sweep_backward || symmetric) {
-      for (int i = 0; i < n; ++i) {
-        double sigma = 0.0;
-        double diag = 0.0;
-
-        // Iterate over non-zero elements of row i
-        // Eigen sparse matrix (CSR) outer iterator gives rows, inner gives cols
-        // But standard inner iterator usage:
-        for (Eigen::SparseMatrix<double>::InnerIterator it(A, i); it; ++it) {
-          if (it.index() == i) {
-            diag = it.value();
-          } else {
-            sigma += it.value() * x_curr[it.index()];
-          }
-        }
-
-        if (std::abs(diag) > 1e-14) {
-          x_curr[i] = (b[i] - sigma) / diag;
-        }
-      }
-    }
-
-    // Backward Sweep (for Symmetric GS)
-    if (sweep_backward || symmetric) {
-      for (int i = n - 1; i >= 0; --i) {
-        double sigma = 0.0;
-        double diag = 0.0;
-
-        for (Eigen::SparseMatrix<double>::InnerIterator it(A, i); it; ++it) {
-          if (it.index() == i) {
-            diag = it.value();
-          } else {
-            sigma += it.value() * x_curr[it.index()];
-          }
-        }
-
-        if (std::abs(diag) > 1e-14) {
-          x_curr[i] = (b[i] - sigma) / diag;
-        }
-      }
-    }
-  }
-
-  return x_curr;
-}
-
-Eigen::VectorXd GravoMG::TetMultigridSolver::computeGaussSeidel(
-    const SparseMatrixCSR &A, const Eigen::VectorXd &b,
-    const Eigen::VectorXd &x, const int iterations, const bool sweep_backward,
-    const bool symmetric) {
-  // x is the initial guess
-  Eigen::VectorXd x_curr = x;
-  int n = static_cast<int>(A.rows());
-
-  // Check dimensions
-  if (A.cols() != n || b.size() != n || x.size() != n) {
-    std::cerr << "[CPP] Error: Dimension mismatch in computeGaussSeidel (CSR)"
-              << std::endl;
-    return x;
-  }
-
-  for (int iter = 0; iter < iterations; ++iter) {
-    // Forward Sweep
-    if (!sweep_backward || symmetric) {
-      for (int i = 0; i < n; ++i) {
-        double sigma = 0.0;
-        double diag = 0.0;
-
-        // Iterate over non-zero elements of row i
-        // For RowMajor, InnerIterator iterates over the row naturally
-        for (SparseMatrixCSR::InnerIterator it(A, i); it; ++it) {
-          if (it.index() == i) {
-            diag = it.value();
-          } else {
-            sigma += it.value() * x_curr[it.index()];
-          }
-        }
-
-        if (std::abs(diag) > 1e-14) {
-          x_curr[i] = (b[i] - sigma) / diag;
-        }
-      }
-    }
-
-    // Backward Sweep (for Symmetric GS)
-    if (sweep_backward || symmetric) {
-      for (int i = n - 1; i >= 0; --i) {
-        double sigma = 0.0;
-        double diag = 0.0;
-
-        for (SparseMatrixCSR::InnerIterator it(A, i); it; ++it) {
-          if (it.index() == i) {
-            diag = it.value();
-          } else {
-            sigma += it.value() * x_curr[it.index()];
-          }
-        }
-
-        if (std::abs(diag) > 1e-14) {
-          x_curr[i] = (b[i] - sigma) / diag;
-        }
-      }
-    }
-  }
-
-  return x_curr;
-}
-
-// =================================================================================================
 // MARK: V-Cycle Solver Implementation
 // =================================================================================================
-
-Eigen::VectorXd GravoMG::TetMultigridSolver::computeJacobi(
-    const Eigen::SparseMatrix<double> &A, const Eigen::VectorXd &b,
-    const Eigen::VectorXd &x, int iterations, double omega) {
-  // Damped Jacobi: x_new = x + omega * D^{-1} * (b - A*x)
-  // Pre-compute D^{-1} for efficiency
-  Eigen::VectorXd d_inv(A.rows());
-  for (int i = 0; i < A.rows(); ++i) {
-    double diag = A.coeff(i, i);
-    d_inv(i) = (std::abs(diag) > 1e-14) ? (1.0 / diag) : 0.0;
-  }
-
-  Eigen::VectorXd x_curr = x;
-  for (int iter = 0; iter < iterations; ++iter) {
-    // r = b - A*x
-    Eigen::VectorXd r = b - A * x_curr;
-    // x = x + omega * D^{-1} * r
-    x_curr = x_curr + omega * (d_inv.cwiseProduct(r));
-  }
-
-  return x_curr;
-}
 
 bool GravoMG::TetMultigridSolver::buildVCycleHierarchy(
     const Eigen::SparseMatrix<double> &A_fine) {
   if (verbose) {
-    std::cout << "[CPP] buildVCycleHierarchy called for Ours" << std::endl;
+    std::cout << "[CPP] buildVCycleHierarchy called" << std::endl;
   }
 
-  // Select prolongation operators: external (if set), otherwise use Ours.
-  const std::vector<Eigen::SparseMatrix<double>> *prols_ptr = nullptr;
-
-  if (use_external_prolongations_ && !external_prolongations_.empty()) {
-    prols_ptr = &external_prolongations_;
-    if (verbose) {
-      std::cout << "[CPP] Using EXTERNAL prolongations ("
-                << external_prolongations_.size() << " levels)" << std::endl;
-    }
-  } else {
-    prols_ptr = &allP;
-  }
-
-  const auto &prols = *prols_ptr;
-
+  const auto &prols = allP;
   if (prols.empty()) {
     if (verbose) {
-      std::cerr << "[CPP] Error: No prolongation operators available for Ours"
-                << std::endl;
+      std::cerr
+          << "[CPP] Error: No prolongation operators available. "
+             "Call constructProlongationOurs first."
+          << std::endl;
     }
     return false;
   }
@@ -352,10 +140,22 @@ bool GravoMG::TetMultigridSolver::buildVCycleHierarchy(
     vcycle_diag_inv_.push_back(d_inv);
   }
 
-  // Pre-compute spectral radius estimates and Chebyshev coefficients for each
-  // level This enables Chebyshev-accelerated Jacobi smoothing
-  vcycle_spectral_radius_.clear();
-  vcycle_spectral_radius_.reserve(vcycle_num_levels_ - 1);
+  // Pre-compute Chebyshev omega coefficients per level for accelerated Jacobi
+  // smoothing.  For each level we estimate lambda_max of D^{-1}A via power
+  // iteration, then use the standard Chebyshev formula
+  //   omega[k] = 2 / (lambda_max + lambda_min - (lambda_max - lambda_min) cos(theta_k)),
+  //   theta_k  = pi (2k + 1) / (2 * chebyshev_degree_)
+  // with a conservative lambda_min = lambda_max / 10.
+  //
+  // Stability note: if lambda_max is *under-estimated*, eigenmodes between
+  // the estimate and the true spectral radius are amplified every V-cycle and
+  // the iteration diverges.  Very uniform tet meshes (TetGen `q1.1` outputs)
+  // have closely clustered eigenvalues, so plain power iteration converges
+  // slowly there.  We therefore use 50 power iterations and a 20% safety
+  // margin, which is robust on all meshes we have tested without changing
+  // the asymptotic V-cycle rate measurably.
+  constexpr int POWER_ITERATIONS = 50;
+  constexpr double SPECTRAL_SAFETY = 1.20;
   vcycle_chebyshev_omega_.clear();
   vcycle_chebyshev_omega_.reserve(vcycle_num_levels_ - 1);
 
@@ -364,34 +164,19 @@ bool GravoMG::TetMultigridSolver::buildVCycleHierarchy(
     const auto &d_inv = vcycle_diag_inv_[level];
     int n = static_cast<int>(A_level.rows());
 
-    // Power iteration to estimate spectral radius of D^{-1}A
-    // Use 10 iterations for a quick estimate (accurate enough for Chebyshev)
     Eigen::VectorXd v = Eigen::VectorXd::Random(n);
     v.normalize();
     double lambda_max = 1.0;
-
-    for (int iter = 0; iter < 10; ++iter) {
-      // w = D^{-1} * A * v
-      Eigen::VectorXd Av = A_level * v;
-      Eigen::VectorXd w = d_inv.cwiseProduct(Av);
+    for (int iter = 0; iter < POWER_ITERATIONS; ++iter) {
+      Eigen::VectorXd w = d_inv.cwiseProduct(A_level * v);
       lambda_max = w.norm();
       if (lambda_max > 1e-10) {
         v = w / lambda_max;
       }
     }
-
-    // Safety margin: slightly overestimate to ensure stability
-    lambda_max *= 1.05;
-
-    vcycle_spectral_radius_.push_back(lambda_max);
-
-    // Compute Chebyshev omega coefficients for this level
-    // For SPD matrices, eigenvalues are in [lambda_min, lambda_max]
-    // Conservative: lambda_min = lambda_max / 10 (standard multigrid
-    // assumption)
+    lambda_max *= SPECTRAL_SAFETY;
     double lambda_min = lambda_max / 10.0;
 
-    // Pre-compute for sweeps 0..chebyshev_degree_-1
     std::vector<double> omegas(chebyshev_degree_);
     for (int k = 0; k < chebyshev_degree_; ++k) {
       double theta = M_PI * (2.0 * k + 1.0) / (2.0 * chebyshev_degree_);
@@ -401,8 +186,9 @@ bool GravoMG::TetMultigridSolver::buildVCycleHierarchy(
     vcycle_chebyshev_omega_.push_back(omegas);
 
     if (verbose) {
-      std::cout << "[CPP] Level " << level << ": spectral radius ≈ "
-                << lambda_max << ", Chebyshev ω = [" << omegas[0];
+      std::cout << "[CPP] Level " << level
+                << ": spectral radius approx " << lambda_max
+                << ", Chebyshev omega = [" << omegas[0];
       for (size_t i = 1; i < omegas.size(); ++i)
         std::cout << ", " << omegas[i];
       std::cout << "]" << std::endl;
@@ -476,7 +262,7 @@ GravoMG::TetMultigridSolver::VCycleSolveResult
 GravoMG::TetMultigridSolver::solveVCycle(
     const Eigen::VectorXd &b, const Eigen::VectorXd &x0, int max_cycles,
     int pre_sweeps, int post_sweeps, double tol, double timeout_ms,
-    SmootherType smoother, double jacobi_omega, bool collect_timing,
+    double jacobi_omega, bool collect_timing,
     const Eigen::VectorXd &mass_diag_inv) {
   VCycleSolveResult result;
   this->jacobi_omega_ = jacobi_omega;
@@ -528,7 +314,7 @@ GravoMG::TetMultigridSolver::solveVCycle(
 
     // Perform one V-cycle
     result.x = vcycleRecursive(0, result.x, b, pre_sweeps, post_sweeps,
-                               smoother, collect_timing, result);
+                               collect_timing, result);
     result.num_cycles++;
 
     // Compute residual
@@ -568,83 +354,74 @@ GravoMG::TetMultigridSolver::solveVCycle(
   return result;
 }
 
+// Apply `n_sweeps` of Chebyshev-accelerated, OpenMP-parallel damped Jacobi.
+// Sweeps 0..min(n_sweeps, chebyshev_degree_)-1 use the precomputed omega[s];
+// any remaining sweeps fall back to the fixed jacobi_omega_.
+//
+//   x_new[i] = x[i] + omega * D^{-1}[i] * (b[i] - (A x)[i])
+static inline void smoothChebyshevJacobi(
+    const GravoMG::TetMultigridSolver::SparseMatrixCSR &A,
+    const Eigen::VectorXd &b, Eigen::VectorXd &x_level,
+    const Eigen::VectorXd &d_inv, const std::vector<double> &cheb_omega,
+    double jacobi_omega, int n_sweeps) {
+  int rows = static_cast<int>(A.rows());
+  Eigen::VectorXd x_buf1 = x_level;
+  Eigen::VectorXd x_buf2(rows);
+  Eigen::VectorXd *x_read = &x_buf1;
+  Eigen::VectorXd *x_write = &x_buf2;
+
+  for (int s = 0; s < n_sweeps; ++s) {
+    double omega = (s < static_cast<int>(cheb_omega.size()))
+                       ? cheb_omega[s]
+                       : jacobi_omega;
+#pragma omp parallel for schedule(static)
+    for (int i = 0; i < rows; ++i) {
+      double sigma = 0.0;
+      for (GravoMG::TetMultigridSolver::SparseMatrixCSR::InnerIterator it(A, i);
+           it; ++it) {
+        sigma += it.value() * (*x_read)[it.index()];
+      }
+      double r = b[i] - sigma;
+      (*x_write)[i] = (*x_read)[i] + omega * d_inv[i] * r;
+    }
+    std::swap(x_read, x_write);
+  }
+  x_level = *x_read;
+}
+
 Eigen::VectorXd GravoMG::TetMultigridSolver::vcycleRecursive(
     int level, const Eigen::VectorXd &x, const Eigen::VectorXd &b,
-    int pre_sweeps, int post_sweeps, SmootherType smoother, bool collect_timing,
+    int pre_sweeps, int post_sweeps, bool collect_timing,
     VCycleSolveResult &timing) {
   const auto &A_level = vcycle_operators_[level];
-  const auto &prols =
-      vcycle_prolongations_; // Use prolongation operators from hierarchy build
 
   // Base case: coarsest level - use direct solver
   if (level == vcycle_num_levels_ - 1) {
     auto t_start = std::chrono::high_resolution_clock::now();
-
     Eigen::VectorXd x_coarse;
     if (use_dense_coarse_solver_ && dense_coarse_solver_) {
       x_coarse = dense_coarse_solver_->solve(b);
     } else {
       x_coarse = coarse_solver_->solve(b);
     }
-
     if (collect_timing) {
       auto t_end = std::chrono::high_resolution_clock::now();
       std::chrono::duration<double, std::milli> elapsed = t_end - t_start;
       timing.coarse_solve_time_ms += elapsed.count();
     }
-
     return x_coarse;
   }
 
-  // Debug print for omega (only once per solve/level to avoid spam, or relying
-  // on verbose flag?) if (verbose && level == 0) { ... } // verbose not
-  // accessible easily here without passing it or member
-
   Eigen::VectorXd x_level = x;
-  const auto &P = prols[level];
+  const auto &P = vcycle_prolongations_[level];
   const auto &d_inv = vcycle_diag_inv_[level];
+  const auto &cheb_omega = vcycle_chebyshev_omega_[level];
 
   // Pre-smoothing
   {
     auto t_start = std::chrono::high_resolution_clock::now();
-
-    if (smoother == SmootherType::JACOBI) {
-      // Optimized OpenMP Parallel Chebyshev-accelerated Jacobi with pointer
-      // swap
-      int rows = static_cast<int>(A_level.rows());
-      Eigen::VectorXd x_buf1 = x_level;
-      Eigen::VectorXd x_buf2(rows);
-      Eigen::VectorXd *x_read = &x_buf1;
-      Eigen::VectorXd *x_write = &x_buf2;
-
-      // Get pre-computed Chebyshev omega values for this level
-      const auto &cheb_omega = vcycle_chebyshev_omega_[level];
-
-      for (int s = 0; s < pre_sweeps; ++s) {
-        // Use Chebyshev omega if available, else fall back to fixed omega
-        double omega = (s < static_cast<int>(cheb_omega.size()))
-                           ? cheb_omega[s]
-                           : jacobi_omega_;
-
-#pragma omp parallel for schedule(static)
-        for (int i = 0; i < rows; ++i) {
-          double sigma = 0.0;
-          // For RowMajor, InnerIterator iterates over the row 'i'
-          for (SparseMatrixCSR::InnerIterator it(A_level, i); it; ++it) {
-            sigma += it.value() * (*x_read)[it.index()];
-          }
-          double r = b[i] - sigma;
-          (*x_write)[i] = (*x_read)[i] + omega * d_inv[i] * r;
-        }
-        std::swap(x_read, x_write); // Pointer swap instead of vector copy
-      }
-      x_level = *x_read; // Copy final result (only once)
-    } else {
-      // Gauss-Seidel
-      x_level =
-          computeGaussSeidel(A_level, b, x_level, pre_sweeps, false, false);
-    }
-
+    smoothChebyshevJacobi(A_level, b, x_level, d_inv, cheb_omega,
+                          jacobi_omega_, pre_sweeps);
     if (collect_timing) {
       auto t_end = std::chrono::high_resolution_clock::now();
       std::chrono::duration<double, std::milli> elapsed = t_end - t_start;
@@ -681,7 +458,7 @@ Eigen::VectorXd GravoMG::TetMultigridSolver::vcycleRecursive(
       Eigen::VectorXd::Zero(vcycle_operators_[level + 1].rows());
   Eigen::VectorXd e_coarse =
       vcycleRecursive(level + 1, x_coarse_init, b_coarse, pre_sweeps,
-                      post_sweeps, smoother, collect_timing, timing);
+                      post_sweeps, collect_timing, timing);
 
   // Prolongate correction and add to solution
   {
@@ -697,42 +474,8 @@ Eigen::VectorXd GravoMG::TetMultigridSolver::vcycleRecursive(
   // Post-smoothing
   {
     auto t_start = std::chrono::high_resolution_clock::now();
-
-    if (smoother == SmootherType::JACOBI) {
-      // Optimized OpenMP Parallel Chebyshev-accelerated Jacobi with pointer
-      // swap
-      int rows = static_cast<int>(A_level.rows());
-      Eigen::VectorXd x_buf1 = x_level;
-      Eigen::VectorXd x_buf2(rows);
-      Eigen::VectorXd *x_read = &x_buf1;
-      Eigen::VectorXd *x_write = &x_buf2;
-
-      // Get pre-computed Chebyshev omega values for this level
-      const auto &cheb_omega = vcycle_chebyshev_omega_[level];
-
-      for (int s = 0; s < post_sweeps; ++s) {
-        // Use Chebyshev omega if available, else fall back to fixed omega
-        double omega = (s < static_cast<int>(cheb_omega.size()))
-                           ? cheb_omega[s]
-                           : jacobi_omega_;
-
-#pragma omp parallel for schedule(static)
-        for (int i = 0; i < rows; ++i) {
-          double sigma = 0.0;
-          for (SparseMatrixCSR::InnerIterator it(A_level, i); it; ++it) {
-            sigma += it.value() * (*x_read)[it.index()];
-          }
-          double r = b[i] - sigma;
-          (*x_write)[i] = (*x_read)[i] + omega * d_inv[i] * r;
-        }
-        std::swap(x_read, x_write); // Pointer swap instead of vector copy
-      }
-      x_level = *x_read; // Copy final result (only once)
-    } else {
-      x_level =
-          computeGaussSeidel(A_level, b, x_level, post_sweeps, false, false);
-    }
-
+    smoothChebyshevJacobi(A_level, b, x_level, d_inv, cheb_omega,
+                          jacobi_omega_, post_sweeps);
     if (collect_timing) {
       auto t_end = std::chrono::high_resolution_clock::now();
       std::chrono::duration<double, std::milli> elapsed = t_end - t_start;
@@ -741,133 +484,4 @@ Eigen::VectorXd GravoMG::TetMultigridSolver::vcycleRecursive(
   }
 
   return x_level;
-}
-
-// Set external prolongation operators (for unified solver support)
-void GravoMG::TetMultigridSolver::setExternalProlongations(
-    const std::vector<Eigen::SparseMatrix<double>> &prolongations) {
-  external_prolongations_ = prolongations;
-  use_external_prolongations_ = true;
-
-  // Clear any previously built V-cycle hierarchy since P changed
-  vcycle_hierarchy_built_ = false;
-
-  if (verbose) {
-    std::cout << "[CPP] setExternalProlongations: Received "
-              << prolongations.size() << " prolongation matrices" << std::endl;
-    if (!prolongations.empty()) {
-      std::cout << "[CPP]   P[0] shape: " << prolongations[0].rows() << " x "
-                << prolongations[0].cols() << std::endl;
-    }
-  }
-}
-
-// Clear external prolongations
-void GravoMG::TetMultigridSolver::clearExternalProlongations() {
-  external_prolongations_.clear();
-  external_prolongations_.shrink_to_fit();
-  use_external_prolongations_ = false;
-
-  if (verbose) {
-    std::cout
-        << "[CPP] clearExternalProlongations: Reverted to internal hierarchy"
-        << std::endl;
-  }
-}
-
-// ============================================================================
-// Standalone Direct Solve (free function)
-// ============================================================================
-
-namespace {
-
-/// Helper template: run analyzePattern + factorize + solve with 3-phase timing.
-template <typename SolverT>
-GravoMG::DirectSolveResult solveWithEigenSolver(
-    const Eigen::SparseMatrix<double>& A,
-    const Eigen::VectorXd& b,
-    const std::string& name) {
-
-  GravoMG::DirectSolveResult result;
-  result.solver_name = name;
-  result.success = false;
-
-  auto wall_start = std::chrono::high_resolution_clock::now();
-
-  SolverT solver;
-
-  // Phase 1: Symbolic analysis (fill-reducing ordering + symbolic structure)
-  auto t0 = std::chrono::high_resolution_clock::now();
-  solver.analyzePattern(A);
-  auto t1 = std::chrono::high_resolution_clock::now();
-  result.analyze_time_ms =
-      std::chrono::duration<double, std::milli>(t1 - t0).count();
-
-  if (solver.info() != Eigen::Success) {
-    result.error = "analyzePattern failed (info=" +
-                   std::to_string(static_cast<int>(solver.info())) + ")";
-    result.total_time_ms =
-        std::chrono::duration<double, std::milli>(t1 - wall_start).count();
-    return result;
-  }
-
-  // Phase 2: Numerical factorization
-  auto t2 = std::chrono::high_resolution_clock::now();
-  solver.factorize(A);
-  auto t3 = std::chrono::high_resolution_clock::now();
-  result.factorize_time_ms =
-      std::chrono::duration<double, std::milli>(t3 - t2).count();
-
-  if (solver.info() != Eigen::Success) {
-    result.error = "factorize failed (info=" +
-                   std::to_string(static_cast<int>(solver.info())) +
-                   "). Matrix may not be SPD.";
-    result.total_time_ms =
-        std::chrono::duration<double, std::milli>(t3 - wall_start).count();
-    return result;
-  }
-
-  // Phase 3: Forward/back substitution
-  auto t4 = std::chrono::high_resolution_clock::now();
-  result.x = solver.solve(b);
-  auto t5 = std::chrono::high_resolution_clock::now();
-  result.solve_time_ms =
-      std::chrono::duration<double, std::milli>(t5 - t4).count();
-
-  if (solver.info() != Eigen::Success) {
-    result.error = "solve failed (info=" +
-                   std::to_string(static_cast<int>(solver.info())) + ")";
-    result.total_time_ms =
-        std::chrono::duration<double, std::milli>(t5 - wall_start).count();
-    return result;
-  }
-
-  result.total_time_ms =
-      std::chrono::duration<double, std::milli>(t5 - wall_start).count();
-  result.success = true;
-  return result;
-}
-
-} // anonymous namespace
-
-GravoMG::DirectSolveResult GravoMG::solveDirectEigen(
-    const Eigen::SparseMatrix<double>& A,
-    const Eigen::VectorXd& b,
-    const std::string& solver_type) {
-
-  if (solver_type == "eigen-llt") {
-    return solveWithEigenSolver<
-        Eigen::SimplicialLLT<Eigen::SparseMatrix<double>>>(
-        A, b, "Eigen SimplicialLLT");
-  } else if (solver_type == "eigen-ldlt") {
-    return solveWithEigenSolver<
-        Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>>>(
-        A, b, "Eigen SimplicialLDLT");
-  } else {
-    DirectSolveResult result;
-    result.success = false;
-    result.error = "Unknown solver_type: '" + solver_type +
-                   "'. Supported: 'eigen-llt', 'eigen-ldlt'";
-    return result;
-  }
 }

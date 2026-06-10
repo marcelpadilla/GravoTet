@@ -117,24 +117,22 @@ def _surface_by_nearest_coarse(
     fine_verts: np.ndarray,
     fine_boundary_tris: np.ndarray,
     coarse_verts: np.ndarray,
+    num_coarse_exterior: int = 0,
 ) -> np.ndarray:
-    """Map fine surface triangles to nearest coarse vertices for PNG rendering.
+    """Map fine surface triangles to nearest coarse exterior vertices for PNG rendering.
 
-    For each fine surface vertex, finds the nearest coarse vertex by Euclidean
-    distance (KD-tree).  Remaps the fine boundary triangles to coarse vertex
-    indices, removes degenerate triangles (two or more vertices mapping to the
-    same coarse vertex), and deduplicates.
-
-    The result is a complete, hole-free exterior surface representation at the
-    coarse level.  Winding is inherited from the fine mesh.  Triangle density
-    reflects the coarse sampling: dense where many fine vertices map to different
-    coarse vertices, sparse where large coarse cells span broad regions.
+    Only exterior coarse vertices (the first `num_coarse_exterior` entries in
+    coarse_verts) are considered as candidates.  This prevents fine surface
+    points from snapping to interior coarse vertices that happen to be closer,
+    which would create inward dents in the rendered surface.
 
     Parameters
     ----------
-    fine_verts        : (N, 3) fine vertex positions
-    fine_boundary_tris: (F, 3) fine surface triangle vertex indices
-    coarse_verts      : (C, 3) coarse vertex positions
+    fine_verts          : (N, 3) fine vertex positions
+    fine_boundary_tris  : (F, 3) fine surface triangle vertex indices
+    coarse_verts        : (C, 3) coarse vertex positions
+    num_coarse_exterior : number of exterior vertices (first K in coarse_verts)
+                          If 0 or >= C, all coarse verts are used.
 
     Returns
     -------
@@ -145,18 +143,28 @@ def _surface_by_nearest_coarse(
     if len(fine_boundary_tris) == 0 or len(coarse_verts) == 0:
         return np.zeros((0, 3), dtype=np.int32)
 
+    # Restrict to exterior coarse vertices only.
+    if 0 < num_coarse_exterior < len(coarse_verts):
+        candidate_verts = coarse_verts[:num_coarse_exterior]
+    else:
+        candidate_verts = coarse_verts
+
     surf_idx = np.unique(fine_boundary_tris)
     surf_pos = fine_verts[surf_idx]
 
-    tree = KDTree(coarse_verts)
+    tree = KDTree(candidate_verts)
     _, nn = tree.query(surf_pos)
 
     # Build fine-vertex-index → coarse-vertex-index map.
-    fine_to_coarse = np.zeros(len(fine_verts), dtype=np.int32)
+    fine_to_coarse = np.full(len(fine_verts), -1, dtype=np.int32)
     fine_to_coarse[surf_idx] = nn
 
     # Remap fine triangles.
     coarse_tris = fine_to_coarse[fine_boundary_tris]
+    valid = np.all(coarse_tris >= 0, axis=1)
+    coarse_tris = coarse_tris[valid]
+    if len(coarse_tris) == 0:
+        return np.zeros((0, 3), dtype=np.int32)
 
     # Remove degenerate triangles.
     v0, v1, v2 = coarse_tris[:, 0], coarse_tris[:, 1], coarse_tris[:, 2]
@@ -231,6 +239,23 @@ def _write_ply(filepath: Path, verts: np.ndarray, tris: np.ndarray,
 # Render helpers
 # ---------------------------------------------------------------------------
 
+def _apply_render_rotation(verts: np.ndarray) -> np.ndarray:
+    """Rotate vertices 90 degrees around the X axis for rendering.
+
+    Many mesh datasets (including Keenan Crane's collection) use a Y-up
+    coordinate convention, while pyvista's default isometric camera treats Z
+    as "up".  Without correction the models appear to be lying on their backs
+    when rendered from the iso viewpoint.
+
+    Rx(+90 deg): (x, y, z) -> (x, -z, y)
+    This maps the Y-up axis to Z-up so the model stands upright in pyvista.
+    """
+    R = np.array([[1, 0,  0],
+                  [0, 0, -1],
+                  [0, 1,  0]], dtype=np.float64)
+    return verts @ R.T
+
+
 def _render_surface(verts: np.ndarray, tris: np.ndarray,
                     title: str, out_path: Path,
                     draw_edges: bool = False) -> None:
@@ -253,11 +278,12 @@ def _render_surface(verts: np.ndarray, tris: np.ndarray,
     pl.background_color = "white"
 
     if len(tris) > 0 and len(verts) > 0:
+        rotated = _apply_render_rotation(verts)
         # pyvista face format: [3, i0, i1, i2, 3, i0, i1, i2, ...]
         faces_pv = np.hstack(
             [np.full((len(tris), 1), 3, dtype=np.int_), tris]
         ).ravel()
-        mesh = pv.PolyData(verts.astype(np.float32), faces_pv)
+        mesh = pv.PolyData(rotated.astype(np.float32), faces_pv)
 
         lw = max(0.5, min(3.0, 300.0 / max(len(tris), 1)))
         pl.add_mesh(
@@ -285,6 +311,99 @@ def _render_surface(verts: np.ndarray, tris: np.ndarray,
 # Public API
 # ---------------------------------------------------------------------------
 
+def _render_level_strip(solver: Any, output_dir: Path,
+                        fine_boundary_tris: np.ndarray,
+                        fine_verts: np.ndarray,
+                        exterior_counts: list[int]) -> Path:
+    """Render all hierarchy levels into a single horizontal strip PNG.
+
+    Each level shows the exterior surface with edge overlay and vertex count
+    below. All levels share the same camera angle for easy visual comparison.
+
+    Returns the path to the generated strip PNG.
+    """
+    import pyvista as pv
+    from PIL import Image
+
+    n_levels = len(solver.all_vertices)
+
+    # Collect renders for each level
+    from io import BytesIO
+    level_images: list[Image.Image] = []
+
+    for i in range(n_levels):
+        verts = np.asarray(solver.all_vertices[i], dtype=np.float64)
+
+        if i == 0:
+            render_tris = fine_boundary_tris
+        else:
+            render_tris = _surface_by_nearest_coarse(
+                fine_verts, fine_boundary_tris, verts,
+                num_coarse_exterior=exterior_counts[i],
+            )
+
+        # Label: level name + vertex count
+        if i == 0:
+            level_name = f"Level {i} (fine) — {len(verts):,} verts"
+        elif i == n_levels - 1:
+            level_name = f"Level {i} (coarsest) — {len(verts):,} verts"
+        else:
+            level_name = f"Level {i} — {len(verts):,} verts"
+
+        # Render each level as a 750×750 image
+        pl = pv.Plotter(off_screen=True, window_size=[750, 750])
+        pl.background_color = "white"
+
+        if len(render_tris) > 0 and len(verts) > 0:
+            rotated = _apply_render_rotation(verts)
+            faces_pv = np.hstack(
+                [np.full((len(render_tris), 1), 3, dtype=np.int_),
+                 render_tris]
+            ).ravel()
+            mesh = pv.PolyData(rotated.astype(np.float32), faces_pv)
+
+            lw = max(0.6, min(3.0, 400.0 / max(len(render_tris), 1)))
+            pl.add_mesh(
+                mesh,
+                color="#4582B5",
+                show_edges=True,
+                edge_color="#141F3F",
+                line_width=lw,
+                lighting=True,
+                smooth_shading=False,
+            )
+
+        pl.camera_position = "iso"
+        pl.camera.azimuth = -15
+        pl.camera.elevation = 10
+        pl.camera.zoom(0.9)
+
+        pl.add_text(level_name, position="upper_edge",
+                    font_size=10, color="black")
+        # Use in-memory screenshot to avoid Windows file-lock issues
+        img_arr = pl.screenshot(return_img=True)
+        pl.close()
+
+        level_images.append(Image.fromarray(img_arr))
+
+    # --- Concatenate horizontally ---
+    widths = [img.width for img in level_images]
+    max_h = max(img.height for img in level_images)
+
+    total_w = sum(widths)
+    strip = Image.new("RGB", (total_w, max_h), (255, 255, 255))
+
+    x_offset = 0
+    for img in level_images:
+        y_offset = (max_h - img.height) // 2
+        strip.paste(img, (x_offset, y_offset))
+        x_offset += img.width
+
+    strip_path = output_dir / "hierarchy_strip.png"
+    strip.save(str(strip_path), "PNG")
+    return strip_path
+
+
 def save_hierarchy_meshes(solver: Any, output_dir: Path) -> list[Path]:
     """Export each hierarchy level as a PLY mesh file and a PNG render.
 
@@ -295,11 +414,14 @@ def save_hierarchy_meshes(solver: Any, output_dir: Path) -> list[Path]:
       These files load correctly in Blender and MeshLab.
 
     PNG (visualization — nearest-coarse-vertex mapped surface):
-      - Level 0: fine boundary surface, smooth Phong shading.
+      - Level 0: fine boundary surface, smooth Phong shading with edge overlay.
       - Level i > 0: fine surface triangles remapped to nearest coarse vertices
         via KD-tree (see _surface_by_nearest_coarse).  All faces rendered with
         both-side shading (abs(dot)) and fully opaque — no holes, no interior
-        bleed-through.  Wireframe overlay shows actual coarsening density.
+        bleed-through.
+
+    In addition to individual per-level PNGs, a ``hierarchy_strip.png`` is
+    written showing all levels side-by-side with edge overlay on every level.
 
     Parameters
     ----------
@@ -315,6 +437,19 @@ def save_hierarchy_meshes(solver: Any, output_dir: Path) -> list[Path]:
     mesh_dir.mkdir(parents=True, exist_ok=True)
 
     n_levels = len(solver.all_vertices)
+
+    # Number of exterior vertices per level.
+    # all_exterior_indices[j] = exterior vertex indices at level j.
+    #   j=0: fine-level exterior vertices (from preprocessExteriorMesh)
+    #   j>0: coarse exterior vertices at level j (from hierarchy construction)
+    # exterior_counts[i] is used in _surface_by_nearest_coarse to restrict the
+    # KD-tree to the exterior coarse vertices (which FDS places first).
+    ext_idx_attr = getattr(solver, "all_exterior_indices", [])
+    exterior_counts: list[int] = [0] * n_levels
+    for j, idx_list in enumerate(ext_idx_attr):
+        coarse_level = j  # index matches level directly
+        if coarse_level < n_levels:
+            exterior_counts[coarse_level] = len(idx_list)
 
     fine_verts = np.asarray(solver.all_vertices[0], dtype=np.float64)
     fine_tets = np.asarray(solver.all_tetrahedra[0], dtype=np.int32)
@@ -343,10 +478,11 @@ def save_hierarchy_meshes(solver: Any, output_dir: Path) -> list[Path]:
         # --- PNG: clean exterior surface via NN mapping ---
         if i == 0:
             render_tris = fine_boundary_tris
-            draw_edges = False
         else:
-            render_tris = _surface_by_nearest_coarse(fine_verts, fine_boundary_tris, verts)
-            draw_edges = True
+            render_tris = _surface_by_nearest_coarse(
+                fine_verts, fine_boundary_tris, verts,
+                num_coarse_exterior=exterior_counts[i],
+            )
 
         if i == 0:
             level_label = "Level 0 (fine)"
@@ -357,7 +493,10 @@ def save_hierarchy_meshes(solver: Any, output_dir: Path) -> list[Path]:
         title = f"{level_label}\n{len(verts):,} vertices"
         png_path = mesh_dir / f"level_{i}.png"
 
-        _render_surface(verts, render_tris, title, png_path, draw_edges=draw_edges)
+        _render_surface(verts, render_tris, title, png_path, draw_edges=True)
+
+    # --- Strip render: all levels side-by-side with edges ---
+    _render_level_strip(solver, output_dir, fine_boundary_tris, fine_verts, exterior_counts)
 
     return ply_paths
 

@@ -1,21 +1,45 @@
+# Python build / cache
 __pycache__/
 *.py[cod]
+*.egg-info/
+build/
+
+# Compiled C++ extensions
 *.so
 *.pyd
 *.dylib
 
-build/
-*.egg-info/
-
-output/*
-!output/.gitkeep
-
+# Object / library files
 *.o
 *.obj
 *.a
 *.lib
 *.dll
 
+# Generated outputs (created on the fly by the run_demo_*.py drivers).
+# We commit ONE example image -- the cube demo, which runs with no downloaded
+# data -- so the README Results section renders. Everything else is ignored.
+output/*
+!output/cube_200k/
+output/cube_200k/*
+!output/cube_200k/output.png
+
+# Assembled input meshes are not committed (GitHub rejects files over 100 MB).
+# They are reassembled from the committed sub-100 MB parts under data_chunks/
+# by scripts/fetch_data.py, and automatically on the first demo run.
+# (data_chunks/ itself IS tracked.)
+data/
+
+# Internal agent context, not part of the public supplement.
+CLAUDE.md
+
+
+# Environments and IDE-local files
+.venv/
+.env
+
+# Stray logs / smoke-test artifacts
+diag_err.txt
 .eigen_smoke_test*
 header_smoke_test*
 eigen_smoke_test*

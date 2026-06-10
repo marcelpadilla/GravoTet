@@ -3,3 +3,4 @@ scipy>=1.7
 matplotlib>=3.5
 pyvista>=0.40
 pybind11>=2.10
+pillow>=9.0

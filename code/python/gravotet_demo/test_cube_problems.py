@@ -1,7 +1,8 @@
 """Smoke test for the supplementary Poisson and biharmonic cube examples.
 
-Quick validation of a clean checkout. Exits non-zero if either problem fails to
-converge or exceeds its verification thresholds.
+Quick validation of a clean checkout: builds the GravoTet hierarchy on a
+small cube and checks convergence for both PDEs.  Exits non-zero on any
+failure.
 
 Run from the repository root:
 
@@ -15,11 +16,11 @@ import json
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from run_demo import run_suite  # noqa: E402
+from gravotet_demo import ensure_extension, make_cube_mesh, run_suite  # noqa: E402
 
 
 def main() -> int:
@@ -28,7 +29,16 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
 
-    summary, _ = run_suite(resolution=args.resolution, verbose=False)
+    gravotet = ensure_extension()
+    mesh = make_cube_mesh(gravotet, args.resolution)
+    summary = run_suite(
+        gravotet, mesh,
+        label=f"Cube smoke (res {args.resolution})",
+        output_subdir=f"smoke_cube_{args.resolution}",
+        problems=("poisson", "biharmonic"),
+        make_figure=False,
+        verbose=False,
+    )
 
     failed: list[str] = []
     for name, result in summary["problems"].items():
@@ -37,9 +47,13 @@ def main() -> int:
         if result["timed_out"]:
             failed.append(f"{name}: solver timed out")
         if result["relative_residual"] > max(10.0 * result["tolerance"], 1e-10):
-            failed.append(f"{name}: relative residual {result['relative_residual']:.3e} exceeds threshold")
+            failed.append(
+                f"{name}: relative residual {result['relative_residual']:.3e} exceeds threshold"
+            )
         if result["relative_error"] > 1e-4:
-            failed.append(f"{name}: relative error {result['relative_error']:.3e} exceeds threshold")
+            failed.append(
+                f"{name}: relative error {result['relative_error']:.3e} exceeds threshold"
+            )
 
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)

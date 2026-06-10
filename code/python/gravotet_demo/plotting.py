@@ -231,27 +231,40 @@ def _plot_timing(ax, result: dict, title: str, annotate_reuse: bool, shared_hier
 
 
 def save_combined_figure(summary: dict, output_dir: Path) -> Path:
-    """Save the combined 2x2 supplementary figure."""
+    """Save a residual-vs-time and timing figure for whichever PDEs were solved.
+
+    Layout: one row per solved problem, with convergence on the left and a
+    stacked Hierarchy / Setup / Solve timing bar on the right.
+    """
     apply_paper_style()
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    problems = summary["problems"]
+    names = [n for n in ("poisson", "biharmonic") if n in problems]
+    if not names:
+        raise ValueError("save_combined_figure: summary contains no problems")
+
+    rows = len(names)
     fig, axes = plt.subplots(
+        rows,
         2,
-        2,
-        figsize=(PAPER_FIGURE_WIDTH * 2.0, PAPER_FIGURE_HEIGHT * 2.0),
+        figsize=(PAPER_FIGURE_WIDTH * 2.0, PAPER_FIGURE_HEIGHT * rows),
         constrained_layout=True,
+        squeeze=False,
     )
 
-    poisson = summary["problems"]["poisson"]
-    biharmonic = summary["problems"]["biharmonic"]
     shared_hierarchy_ms = float(summary["hierarchy_build_ms"])
+    for i, name in enumerate(names):
+        result = problems[name]
+        title = name.capitalize()
+        _plot_convergence(axes[i, 0], result, title)
+        _plot_timing(
+            axes[i, 1], result, title,
+            annotate_reuse=(name == "biharmonic"),
+            shared_hierarchy_ms=shared_hierarchy_ms,
+        )
 
-    _plot_convergence(axes[0, 0], poisson, "Poisson")
-    _plot_timing(axes[0, 1], poisson, "Poisson", annotate_reuse=False, shared_hierarchy_ms=shared_hierarchy_ms)
-    _plot_convergence(axes[1, 0], biharmonic, "Biharmonic")
-    _plot_timing(axes[1, 1], biharmonic, "Biharmonic", annotate_reuse=True, shared_hierarchy_ms=shared_hierarchy_ms)
-
-    num_verts = summary["problems"]["poisson"]["num_vertices"]
+    num_verts = int(summary["num_vertices"])
     if num_verts >= 1_000_000:
         verts_str = f"{num_verts / 1_000_000:.1f}M"
     elif num_verts >= 1_000:
@@ -260,13 +273,13 @@ def save_combined_figure(summary: dict, output_dir: Path) -> Path:
         verts_str = str(num_verts)
 
     fig.suptitle(
-        f"Cube{summary['resolution']}  |  #Vertices = {verts_str}",
+        f"{summary.get('label', 'GravoTet')}  |  #Vertices = {verts_str}",
         fontsize=PAPER_TITLE_SIZE + 2,
         fontweight="bold",
         y=1.01,
     )
 
-    stem = output_dir / f"combined_cube{summary['resolution']}"
+    stem = output_dir / "combined"
     png_path = stem.with_suffix(".png")
     fig.savefig(png_path, bbox_inches="tight")
     plt.close(fig)

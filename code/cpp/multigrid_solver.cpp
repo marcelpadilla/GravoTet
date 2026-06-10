@@ -121,8 +121,12 @@ void TetMultigridSolver::clearHierarchy() {
   // V-Cycle data
   vcycle_operators_.clear();
   vcycle_operators_.shrink_to_fit();
+  vcycle_prolongations_.clear();
+  vcycle_prolongations_.shrink_to_fit();
   vcycle_diag_inv_.clear();
   vcycle_diag_inv_.shrink_to_fit();
+  vcycle_chebyshev_omega_.clear();
+  vcycle_chebyshev_omega_.shrink_to_fit();
   vcycle_hierarchy_built_ = false;
   vcycle_num_levels_ = 0;
 
@@ -137,314 +141,6 @@ void TetMultigridSolver::clearHierarchy() {
   }
 }
 
-// Compute exterior visualization data on-demand (lazy computation)
-// This is called when visualization requests exterior data for
-// featurePreserve=false mode.
-bool TetMultigridSolver::computeExteriorVisualizationData() {
-  // If already populated (featurePreserve=true), return immediately
-  if (!allExteriorVertices.empty() && allExteriorVertices[0].rows() > 0) {
-    if (verbose) {
-      std::cout
-          << "[CPP] computeExteriorVisualizationData: Data already available."
-          << std::endl;
-    }
-    return true;
-  }
-
-  // Check we have hierarchy data
-  if (all_vertices.empty() || all_tetrahedra.empty()) {
-    std::cerr << "[CPP] computeExteriorVisualizationData: No hierarchy built."
-              << std::endl;
-    return false;
-  }
-
-  if (verbose) {
-    std::cout << "[CPP] computeExteriorVisualizationData: Computing exterior "
-                 "data on-demand..."
-              << std::endl;
-  }
-
-  // =========================================
-  // Step 1: Compute boundary vertices at Level 0
-  // =========================================
-  Eigen::MatrixXi surfaceTriangles;
-  std::vector<int> boundaryVertexIndices =
-      computeBoundaryVertices(inputMesh, surfaceTriangles);
-  std::set<int> boundarySet(boundaryVertexIndices.begin(),
-                            boundaryVertexIndices.end());
-
-  int numBoundary = static_cast<int>(boundaryVertexIndices.size());
-
-  if (numBoundary == 0) {
-    std::cerr << "[CPP] computeExteriorVisualizationData: No boundary vertices "
-                 "found at level 0."
-              << std::endl;
-    return false;
-  }
-
-  // Update class member boundary_indices to match this visualization data
-  // This ensures that allExteriorVertices[0][i] corresponds to global index
-  // boundary_indices[0][i]
-  if (boundary_indices.size() < 1) {
-    boundary_indices.resize(1);
-  }
-  boundary_indices[0] = boundaryVertexIndices;
-
-  // Build level 0 exterior vertices
-  Eigen::MatrixXd extVerts0(numBoundary, 3);
-  std::map<int, int>
-      globalToLocal; // Map global vertex index to local exterior index
-  for (int i = 0; i < numBoundary; ++i) {
-    extVerts0.row(i) = all_vertices[0].row(boundaryVertexIndices[i]);
-    globalToLocal[boundaryVertexIndices[i]] = i;
-  }
-
-  // Build level 0 exterior neighbor matrix from SURFACE TRIANGLES only
-  // This guarantees we only visualize edges that are actually on the surface
-  std::vector<std::vector<int>> adjListL0(numBoundary);
-
-  // If we have access to surface triangles, use them!
-  if (surfaceTriangles.rows() > 0) {
-    if (verbose)
-      std::cout << "  Using " << surfaceTriangles.rows()
-                << " surface triangles for connectivity." << std::endl;
-    for (int i = 0; i < surfaceTriangles.rows(); ++i) {
-      int v0 = surfaceTriangles(i, 0);
-      int v1 = surfaceTriangles(i, 1);
-      int v2 = surfaceTriangles(i, 2);
-
-      if (globalToLocal.count(v0) && globalToLocal.count(v1)) {
-        adjListL0[globalToLocal[v0]].push_back(globalToLocal[v1]);
-        adjListL0[globalToLocal[v1]].push_back(globalToLocal[v0]);
-      }
-      if (globalToLocal.count(v1) && globalToLocal.count(v2)) {
-        adjListL0[globalToLocal[v1]].push_back(globalToLocal[v2]);
-        adjListL0[globalToLocal[v2]].push_back(globalToLocal[v1]);
-      }
-      if (globalToLocal.count(v2) && globalToLocal.count(v0)) {
-        adjListL0[globalToLocal[v2]].push_back(globalToLocal[v0]);
-        adjListL0[globalToLocal[v0]].push_back(globalToLocal[v2]);
-      }
-    }
-  } else {
-    // Fallback (shouldn't happen given computeBoundaryVertices logic)
-    if (verbose)
-      std::cout << "  Warning: No surface triangles returned. Falling back to "
-                   "tet adjacency."
-                << std::endl;
-    for (int t = 0; t < all_tetrahedra[0].rows(); ++t) {
-      for (int i = 0; i < 4; ++i) {
-        for (int j = i + 1; j < 4; ++j) {
-          int vi = all_tetrahedra[0](t, i);
-          int vj = all_tetrahedra[0](t, j);
-          if (boundarySet.count(vi) && boundarySet.count(vj)) {
-            int li = globalToLocal[vi];
-            int lj = globalToLocal[vj];
-            adjListL0[li].push_back(lj);
-            adjListL0[lj].push_back(li);
-          }
-        }
-      }
-    }
-  }
-
-  // Convert to neighbor matrix using existing utility
-  Eigen::MatrixXi extNeigh0 = buildVertexNeighbours(adjListL0, numBoundary);
-
-  // Clear and populate level 0
-  allExteriorVertices.clear();
-  allExteriorNeigh.clear();
-  allExteriorVertices.push_back(extVerts0);
-  allExteriorNeigh.push_back(extNeigh0);
-
-  if (verbose) {
-    std::cout << "  Level 0: " << numBoundary << " exterior vertices"
-              << std::endl;
-  }
-
-  // =========================================
-  // Step 2: Trace survivors through hierarchy
-  // =========================================
-  // =========================================
-  // Step 2: Propagate boundary through nearest-source map
-  // =========================================
-  std::set<int> currentExteriorGlobal =
-      boundarySet; // Global indices at current level
-
-  for (size_t level = 1; level < all_vertices.size(); ++level) {
-    // allNearestSource[level-1] maps vertices of level-1 to their nearest
-    // sample (coarse node)
-    if (level - 1 >= allNearestSource.size()) {
-      break; // No more mapping data
-    }
-    const std::vector<size_t> &nearestSource = allNearestSource[level - 1];
-
-    // Find which coarse nodes (samples) are owners of the current boundary
-    // vertices
-    std::set<int> nextExteriorGlobalSet;
-    for (int fineGlobalIdx : currentExteriorGlobal) {
-      if (fineGlobalIdx >= 0 && fineGlobalIdx < nearestSource.size()) {
-        // The value in nearestSource IS the index in the next coarse level
-        size_t coarseIdx = nearestSource[fineGlobalIdx];
-        nextExteriorGlobalSet.insert(static_cast<int>(coarseIdx));
-      }
-    }
-
-    // Convert set to vector for processing
-    std::vector<int> exteriorCoarseIndices(nextExteriorGlobalSet.begin(),
-                                           nextExteriorGlobalSet.end());
-
-    // Build exterior vertices for this level
-    int numExt = static_cast<int>(exteriorCoarseIndices.size());
-    if (numExt == 0) {
-      // No more exterior vertices at this level (should only happen if mesh
-      // disappears)
-      Eigen::MatrixXd emptyVerts(0, 3);
-      Eigen::MatrixXi emptyNeigh(0, 0);
-      allExteriorVertices.push_back(emptyVerts);
-      allExteriorNeigh.push_back(emptyNeigh);
-      currentExteriorGlobal.clear();
-      continue;
-    }
-
-    // Create vertices matrix and local mapping
-    Eigen::MatrixXd extVertsL(numExt, 3);
-    std::map<int, int> coarseToLocalExt;
-    for (int i = 0; i < numExt; ++i) {
-      int globalIdx = exteriorCoarseIndices[i];
-      // Safety check
-      if (globalIdx < all_vertices[level].rows()) {
-        extVertsL.row(i) = all_vertices[level].row(globalIdx);
-        coarseToLocalExt[globalIdx] = i;
-      }
-    }
-
-    // Build neighbor matrix (edges between exterior vertices using allNeigh)
-    // We only connect two exterior nodes if they are connected in the full
-    // graph
-    std::vector<std::vector<int>> adjListL(numExt);
-    const auto &neighMatrix = allNeigh[level];
-
-    for (int i = 0; i < numExt; ++i) {
-      int globalIdx = exteriorCoarseIndices[i];
-      if (globalIdx >= neighMatrix.rows())
-        continue;
-
-      for (int j = 0; j < neighMatrix.cols(); ++j) {
-        int neighbor = neighMatrix(globalIdx, j);
-        if (neighbor >= 0 && nextExteriorGlobalSet.count(neighbor)) {
-          // Only add connection if neighbor is ALSO on the boundary
-          adjListL[i].push_back(coarseToLocalExt[neighbor]);
-        }
-      }
-    }
-
-    Eigen::MatrixXi extNeighL = buildVertexNeighbours(adjListL, numExt);
-
-    allExteriorVertices.push_back(extVertsL);
-    allExteriorNeigh.push_back(extNeighL);
-
-    if (verbose) {
-      std::cout << "  Level " << level << ": " << numExt
-                << " exterior vertices (propagated)" << std::endl;
-    }
-
-    // Update current exterior for next iteration
-    currentExteriorGlobal = nextExteriorGlobalSet;
-  }
-
-  if (verbose) {
-    std::cout << "[CPP] computeExteriorVisualizationData: Done. "
-              << allExteriorVertices.size() << " levels computed." << std::endl;
-  }
-
-  return true;
-}
-
-// Load tetrahedral mesh from PLY format
-TetrahedralMesh
-TetMultigridSolver::loadFromPLY(const std::string &filename) {
-  std::ifstream file(filename);
-  if (!file.is_open()) {
-    std::cerr << "Failed to open file: " << filename << std::endl;
-    return TetrahedralMesh();
-  }
-
-  std::string line;
-  int numVerts = 0;
-  int numFaces = 0;
-  bool headerEnd = false;
-
-  // Read header
-  while (std::getline(file, line)) {
-    // Trim whitespace
-    line.erase(0, line.find_first_not_of(" \t\r\n"));
-    line.erase(line.find_last_not_of(" \t\r\n") + 1);
-
-    if (line.find("element vertex") == 0) {
-      // Extract number of vertices
-      std::istringstream iss(line);
-      std::string token;
-      iss >> token >> token; // Skip "element" and "vertex"
-      iss >> numVerts;
-    } else if (line.find("element face") == 0) {
-      // Extract number of faces
-      std::istringstream iss(line);
-      std::string token;
-      iss >> token >> token; // Skip "element" and "face"
-      iss >> numFaces;
-    } else if (line == "end_header") {
-      headerEnd = true;
-      break;
-    }
-  }
-
-  if (!headerEnd || numVerts == 0) {
-    std::cerr << "Invalid PLY file format or missing header" << std::endl;
-    file.close();
-    return TetrahedralMesh();
-  }
-
-  // Create mesh with appropriate sizes
-  TetrahedralMesh mesh(numVerts, 0);
-
-  // Read vertices
-  for (int i = 0; i < numVerts; ++i) {
-    file >> mesh.vertices(i, 0) >> mesh.vertices(i, 1) >> mesh.vertices(i, 2);
-    
-    // Skip the rest of the line (depth, feature properties, etc)
-    std::getline(file, line);
-  }
-
-  // Read faces (tetrahedra)
-  mesh.tetrahedra.resize(numFaces, 4);
-  int validTets = 0;
-  
-  for (int i = 0; i < numFaces; ++i) {
-    int numVertsInFace;
-    if (!(file >> numVertsInFace)) break;
-    
-    if (numVertsInFace == 4) {
-      file >> mesh.tetrahedra(validTets, 0) >> mesh.tetrahedra(validTets, 1) 
-           >> mesh.tetrahedra(validTets, 2) >> mesh.tetrahedra(validTets, 3);
-      validTets++;
-    }
-    // Skip the rest of the line just in case there are other properties
-    std::getline(file, line);
-  }
-
-  // Trim to actual tetrahedra counted
-  mesh.tetrahedra.conservativeResize(validTets, 4);
-
-  file.close();
-
-  // Print basic mesh info
-  std::cout << "Loaded PLY: " << filename << " -> " << mesh.tetrahedra.rows()
-            << " tetrahedra, " << mesh.vertices.rows() << " vertices"
-            << std::endl;
-
-  return mesh;
-}
 
 // Generate a cube tetrahedral mesh with N subdivisions per axis
 TetrahedralMesh TetMultigridSolver::generateCubeMesh(int resolution) {
@@ -502,128 +198,6 @@ TetrahedralMesh TetMultigridSolver::generateCubeMesh(int resolution) {
   return mesh;
 }
 
-// Compute boundary vertices AND surface triangles from tetrahedral mesh
-// A face is on the boundary if it appears only once in the mesh
-std::vector<int> TetMultigridSolver::computeBoundaryVertices(
-    const TetrahedralMesh &mesh, Eigen::MatrixXi &surfaceTriangles) {
-  const Eigen::MatrixXi &tets = mesh.tetrahedra;
-  const int numTets = static_cast<int>(tets.rows());
-  const int numVerts = static_cast<int>(mesh.vertices.rows());
-
-  // Struct-based approach preserving winding order for feature preservation
-  struct Face {
-    int v[3];    // Sorted for key
-    int orig[3]; // Original winding for output
-
-    bool operator<(const Face &other) const {
-      if (v[0] != other.v[0])
-        return v[0] < other.v[0];
-      if (v[1] != other.v[1])
-        return v[1] < other.v[1];
-      return v[2] < other.v[2];
-    }
-    bool operator==(const Face &other) const {
-      return v[0] == other.v[0] && v[1] == other.v[1] && v[2] == other.v[2];
-    }
-  };
-
-  std::vector<Face> allFaces(numTets * 4);
-
-#pragma omp parallel for
-  for (int i = 0; i < numTets; ++i) {
-    int t0 = tets(i, 0), t1 = tets(i, 1), t2 = tets(i, 2), t3 = tets(i, 3);
-
-    auto setFace = [&](int idx, int v0, int v1, int v2) {
-      // Store original winding
-      allFaces[idx].orig[0] = v0;
-      allFaces[idx].orig[1] = v1;
-      allFaces[idx].orig[2] = v2;
-
-      // Sort for key
-      if (v0 < v1) {
-        if (v1 < v2) {
-          allFaces[idx].v[0] = v0;
-          allFaces[idx].v[1] = v1;
-          allFaces[idx].v[2] = v2;
-        } else if (v0 < v2) {
-          allFaces[idx].v[0] = v0;
-          allFaces[idx].v[1] = v2;
-          allFaces[idx].v[2] = v1;
-        } else {
-          allFaces[idx].v[0] = v2;
-          allFaces[idx].v[1] = v0;
-          allFaces[idx].v[2] = v1;
-        }
-      } else {
-        if (v0 < v2) {
-          allFaces[idx].v[0] = v1;
-          allFaces[idx].v[1] = v0;
-          allFaces[idx].v[2] = v2;
-        } else if (v1 < v2) {
-          allFaces[idx].v[0] = v1;
-          allFaces[idx].v[1] = v2;
-          allFaces[idx].v[2] = v0;
-        } else {
-          allFaces[idx].v[0] = v2;
-          allFaces[idx].v[1] = v1;
-          allFaces[idx].v[2] = v0;
-        }
-      }
-    };
-
-    // Push faces with consistent outward winding given tet (t0,t1,t2,t3)
-    // 0: (t0, t2, t1) - Face opposite t3 (bottom) - usually (0,2,1) for det>0
-    setFace(i * 4 + 0, t0, t2, t1);
-    // 1: (t0, t1, t3) - Face opposite t2 (side 1)
-    setFace(i * 4 + 1, t0, t1, t3);
-    // 2: (t1, t2, t3) - Face opposite t0 (side 2)
-    setFace(i * 4 + 2, t1, t2, t3);
-    // 3: (t2, t0, t3) - Face opposite t1 (side 3) - usually (2,0,3)
-    setFace(i * 4 + 3, t2, t0, t3);
-  }
-
-  PARALLEL_SORT(allFaces.begin(), allFaces.end());
-
-  std::vector<char> isBoundary(numVerts, 0);
-  std::vector<std::array<int, 3>> boundaryFaces;
-  boundaryFaces.reserve(numTets);
-
-  size_t n = allFaces.size();
-  for (size_t i = 0; i < n;) {
-    size_t j = i + 1;
-    while (j < n && allFaces[i] == allFaces[j])
-      ++j;
-
-    if (j - i == 1) {
-      // Use ORIGINAL winding for output to preserve normals
-      int v0 = allFaces[i].orig[0];
-      int v1 = allFaces[i].orig[1];
-      int v2 = allFaces[i].orig[2];
-
-      isBoundary[v0] = 1;
-      isBoundary[v1] = 1;
-      isBoundary[v2] = 1;
-      boundaryFaces.push_back({v0, v1, v2});
-    }
-    i = j;
-  }
-
-  std::vector<int> boundary;
-  boundary.reserve(numVerts / 10);
-  for (int i = 0; i < numVerts; ++i) {
-    if (isBoundary[i])
-      boundary.push_back(i);
-  }
-
-  surfaceTriangles.resize(boundaryFaces.size(), 3);
-  for (size_t i = 0; i < boundaryFaces.size(); ++i) {
-    surfaceTriangles(i, 0) = boundaryFaces[i][0];
-    surfaceTriangles(i, 1) = boundaryFaces[i][1];
-    surfaceTriangles(i, 2) = boundaryFaces[i][2];
-  }
-
-  return boundary;
-}
 
 // =============================================================================
 // SOLID ANGLE APPROACH FOR EXTERIOR/INTERIOR CLASSIFICATION
@@ -636,12 +210,12 @@ std::vector<int> TetMultigridSolver::computeBoundaryVertices(
  * triangular face opposite to v0. Uses the formula based on the triple product
  * and edge lengths.
  *
- * Formula: Ω = 2 * atan2(|a·(b×c)|, |a||b||c| + |a|(b·c) + |b|(a·c) + |c|(a·b))
+ * Formula: Omega = 2 * atan2(|a.(bxc)|, |a||b||c| + |a|(b.c) + |b|(a.c) + |c|(a.b))
  * where a, b, c are vectors from v0 to v1, v2, v3.
  *
  * @param v0 The vertex at which to compute the solid angle
  * @param v1, v2, v3 The other three vertices of the tetrahedron
- * @return Solid angle in steradians (0 to 2π for a valid tet corner)
+ * @return Solid angle in steradians (0 to 2pi for a valid tet corner)
  */
 double TetMultigridSolver::computeTetSolidAngle(
     const Eigen::RowVector3d &v0, const Eigen::RowVector3d &v1,
@@ -660,10 +234,10 @@ double TetMultigridSolver::computeTetSolidAngle(
     return 0.0;
   }
 
-  // Triple scalar product: a · (b × c)
+  // Triple scalar product: a . (b x c)
   double tripleProduct = a.dot(b.cross(c));
 
-  // Denominator: |a||b||c| + |a|(b·c) + |b|(a·c) + |c|(a·b)
+  // Denominator: |a||b||c| + |a|(b.c) + |b|(a.c) + |c|(a.b)
   double ab = a.dot(b);
   double ac = a.dot(c);
   double bc = b.dot(c);
@@ -684,16 +258,16 @@ double TetMultigridSolver::computeTetSolidAngle(
  *
  * For each vertex, sums the solid angles of all incident tetrahedra.
  * A vertex is considered exterior if its solid angle sum is significantly
- * less than 4π (the full sphere).
+ * less than 4pi (the full sphere).
  *
  * This method naturally handles:
- * - Isolated vertices (no tets → sum = 0 → exterior)
- * - Vertices on floating triangles (no tets → exterior)
+ * - Isolated vertices (no tets -> sum = 0 -> exterior)
+ * - Vertices on floating triangles (no tets -> exterior)
  * - Non-manifold configurations
  *
  * @param mesh          Tetrahedral mesh
  * @param solidAngleSums Output: solid angle sum for each vertex
- * @param threshold     Fraction of 4π below which a vertex is exterior (default
+ * @param threshold     Fraction of 4pi below which a vertex is exterior (default
  * 0.99)
  * @return Indices of exterior vertices, sorted by solid angle sum ascending
  * (sharpest first)
@@ -749,11 +323,11 @@ TetMultigridSolver::computeExteriorVerticesBySolidAngle(
     solidAngleSums[i] = sum;
   }
 
-  // 4π is the solid angle of a complete sphere
+  // 4pi is the solid angle of a complete sphere
   const double FOUR_PI = 4.0 * M_PI;
   const double exteriorThreshold = threshold * FOUR_PI;
 
-  // Find exterior vertices (solid angle sum < threshold * 4π)
+  // Find exterior vertices (solid angle sum < threshold * 4pi)
   std::vector<int> exteriorIndices;
   exteriorIndices.reserve(numVerts / 10); // Estimate ~10% are exterior
 
@@ -781,7 +355,7 @@ TetMultigridSolver::computeExteriorVerticesBySolidAngle(
                 << solidAngleSums[exteriorIndices.back()] << "\n";
     }
     std::cout << "    Threshold: " << exteriorThreshold << " ("
-              << (threshold * 100) << "% of 4π)\n";
+              << (threshold * 100) << "% of 4pi)\n";
   }
 
   return exteriorIndices;
@@ -835,29 +409,26 @@ double TetMultigridSolver::computeTetDihedralAngle(
 }
 
 // =============================================================================
-// OPTIMIZED EXTERIOR GRAPH: Solid-Angle + Connectivity-Based Dihedral
+// EXTERIOR GRAPH: Solid-Angle Classification + Connectivity-Based Dihedral
 // =============================================================================
 //
-// Performance comparison vs buildExteriorGraphNEW():
+// Builds the exterior subgraph and per-vertex sharpness feature for every
+// hierarchy level that has not yet been processed.
 //
-//   buildExteriorGraphNEW (face-hashing approach):
-//     Phase 1: Hash ALL faces (4 × numTets keys), thread-local maps + serial merge
-//     Phase 2: Scan faces → unordered_set for vertices
-//     Phase 3: Scan faces → unordered_set for edges
-//     Phase 4: Scan faces → edgeToFacePair map, then per-vertex lookup
-//     → 4 separate hash-map constructions, serial merge bottleneck,
-//       processes ALL faces even though only ~10% are exterior.
+//   Phase 1: Solid angle sums per vertex (parallel per-tet, no hash maps).
+//            A vertex is exterior iff its solid angle sum is below a fraction
+//            of 4*pi.
+//   Phase 2: Exterior edges from the neighbour matrix (parallel per-vertex)
+//            + dihedral angle sum filter: an edge is exterior iff the dihedral
+//            angles around it sum to less than 2*pi.
+//   Phase 3: Per-vertex feature: for each exterior edge incident to v, find
+//            the two triangular faces via shared exterior neighbours and sum
+//            the angles between adjacent face normals (parallel per-vertex).
 //
-//   buildExteriorGraphNEWALT (this function):
-//     Phase 1: Solid angle sums (parallel per-tet, no hash maps)
-//     Phase 2: Exterior edges from neigh matrix (parallel per-vertex, no hashing)
-//              + dihedral angle filter (reuses computeTetDihedralAngle)
-//     Phase 3: Feature from connectivity: shared-neighbour triangle reconstruction
-//              (parallel per-vertex, no hash maps)
-//     → Zero hash maps. All phases embarrassingly parallel.
-//       Only processes exterior vertices/edges (typically ~10% of mesh).
+// Populates: allExteriorVertices, allExteriorNeigh, allExteriorIndices,
+// allExteriorFeature for every newly-processed level.
 //
-void TetMultigridSolver::buildExteriorGraphNEWALT() {
+void TetMultigridSolver::buildExteriorGraph() {
   // Catch-up loop: process any levels that haven't been processed yet
   while (allExteriorVertices.size() < all_vertices.size()) {
     size_t level = allExteriorVertices.size();
@@ -865,7 +436,7 @@ void TetMultigridSolver::buildExteriorGraphNEWALT() {
     auto start_time = std::chrono::high_resolution_clock::now();
 
     if (verbose) {
-      std::cout << "  [ALT] Building Exterior Graph for Level " << level << " ... ";
+      std::cout << "  Building Exterior Graph for Level " << level << " ... ";
       std::cout.flush();
     }
 
@@ -879,7 +450,7 @@ void TetMultigridSolver::buildExteriorGraphNEWALT() {
     // PHASE 1: Identify Exterior Vertices via Solid Angle Sum
     // =========================================================================
     // For each vertex, sum the solid angles of all incident tets.
-    // Interior: sum ≈ 4π.  Exterior: sum < 4π.
+    // Interior: sum approx 4pi.  Exterior: sum < 4pi.
     // Fully parallel with per-thread accumulators (no hashing).
 
     int maxThreads = omp_get_max_threads();
@@ -916,7 +487,7 @@ void TetMultigridSolver::buildExteriorGraphNEWALT() {
     }
     threadSums.clear(); // free memory
 
-    // Collect exterior indices (serial — just a compact gather)
+    // Collect exterior indices (serial -- just a compact gather)
     std::vector<int> exteriorIndices;
     exteriorIndices.reserve(numVerts / 8);
     for (int i = 0; i < numVerts; ++i) {
@@ -926,7 +497,7 @@ void TetMultigridSolver::buildExteriorGraphNEWALT() {
 
     int numExterior = static_cast<int>(exteriorIndices.size());
 
-    // Global → local mapping (O(1) via dense vector)
+    // Global -> local mapping (O(1) via dense vector)
     std::vector<int> globalToLocal(numVerts, -1);
     for (int i = 0; i < numExterior; ++i)
       globalToLocal[exteriorIndices[i]] = i;
@@ -938,7 +509,7 @@ void TetMultigridSolver::buildExteriorGraphNEWALT() {
     // neighbours are also exterior.  This gives candidate exterior edges.
     //
     // Filter using dihedral angle sum around each edge:
-    //   interior edge → sum ≈ 2π,  exterior edge → sum < 2π
+    //   interior edge -> sum approx 2pi,  exterior edge -> sum < 2pi
     //
     // Dihedral angle sum is accumulated from tets.  We build a per-edge
     // accumulator in parallel using the tet array (similar to solid angle
@@ -994,7 +565,7 @@ void TetMultigridSolver::buildExteriorGraphNEWALT() {
     int numCandEdges = static_cast<int>(candidateEdges.size());
 
     // Step 2b: Accumulate dihedral angle sums for candidate edges
-    // Build a lookup: edge key → index in candidateEdges (for O(1) accumulation)
+    // Build a lookup: edge key -> index in candidateEdges (for O(1) accumulation)
     std::unordered_map<uint64_t, int> edgeKeyToIdx;
     edgeKeyToIdx.reserve(numCandEdges * 2);
     for (int i = 0; i < numCandEdges; ++i)
@@ -1088,7 +659,7 @@ void TetMultigridSolver::buildExteriorGraphNEWALT() {
     // of BOTH v and u, then (v, u, w) forms a surface triangle.
     //
     // For a manifold exterior surface, each edge has exactly 2 shared
-    // neighbours → 2 faces → 1 dihedral angle (angle between normals).
+    // neighbours -> 2 faces -> 1 dihedral angle (angle between normals).
     // The feature for vertex v is the sum of these angles over all its edges.
     //
     // This is fully parallel per vertex, no hash maps needed.
@@ -1263,7 +834,7 @@ void TetMultigridSolver::buildExteriorGraphNEWALT() {
  *
  * Vertices with lower solid angle sums have less "surrounding" material,
  * indicating sharper features (corners have very low sums, flat surface points
- * have sums close to 2π).
+ * have sums close to 2pi).
  */
 void TetMultigridSolver::sortPriorityIndicesBySolidAngle(
     std::vector<int> &Exterior_indices,
@@ -1582,7 +1153,6 @@ std::vector<int> TetMultigridSolver::fastDiskSample(
 
   return samples;
 }
-
 
 
 // Construct clusters using Dijkstra's algorithm (works for any neighbor matrix)
@@ -1985,7 +1555,7 @@ void TetMultigridSolver::coarseGraphBuilder(
 //
 // Phase 1 (Exterior):
 //   - Dijkstra clustering using only exterior-only connectivity
-//     (allExteriorNeigh[0], which was computed by buildExteriorGraphNEWALT)
+//     (allExteriorNeigh[0], which was computed by buildExteriorGraph)
 //   - Build coarse exterior adjacency list from exterior-only fine edges
 //   This treats the exterior as a standalone surface mesh.
 //
@@ -2879,36 +2449,6 @@ std::vector<double> TetMultigridSolver::inverseDistanceWeights(
   return weights;
 }
 
-// Export sparse matrix in Matrix Market format (.mtx)
-// This format is widely supported and can be read by scipy.io.mmread() in
-// Python Naming convention: Prolongation_X_to_Y.mtx where X is coarse level, Y
-// is fine level Level 0 is the finest resolution
-void TetMultigridSolver::exportSparseMatrix(
-    const Eigen::SparseMatrix<double> &matrix, const std::string &filename) {
-  std::ofstream file(filename);
-  if (!file.is_open()) {
-    std::cerr << "Failed to open file for writing: " << filename << "\n";
-    return;
-  }
-
-  // Write Matrix Market header
-  file << "%%MatrixMarket matrix coordinate real general\n";
-  file << "% Prolongation matrix exported from GravoMG\n";
-  file << matrix.rows() << " " << matrix.cols() << " " << matrix.nonZeros()
-       << "\n";
-
-  // Write non-zero entries (1-indexed as per Matrix Market format)
-  for (int k = 0; k < matrix.outerSize(); ++k) {
-    for (Eigen::SparseMatrix<double>::InnerIterator it(matrix, k); it; ++it) {
-      file << (it.row() + 1) << " " << (it.col() + 1) << " "
-           << std::setprecision(16) << it.value() << "\n";
-    }
-  }
-
-  file.close();
-  std::cout << "  Exported sparse matrix to: " << filename << "\n";
-}
-
 // Test prolongation matrix properties
 // Performs essential validation tests on a prolongation matrix
 // Tests: 1) Dimensions, 2) Partition of unity, 3) Non-negativity, 4) Constant
@@ -2934,7 +2474,7 @@ bool TetMultigridSolver::testProlongationMatrix(
     std::cout << "    Got:      " << P.rows() << " x " << P.cols() << "\n";
     allTestsPassed = false;
   } else {
-    std::cout << "  ✓ Dimensions correct\n";
+    std::cout << "  OK Dimensions correct\n";
   }
 
   // ===== TEST 2: Partition of Unity (Row Sums) =====
@@ -2973,7 +2513,7 @@ bool TetMultigridSolver::testProlongationMatrix(
               << maxRowSumError << "\n";
     allTestsPassed = false;
   } else {
-    std::cout << "  ✓ Partition of unity satisfied\n";
+    std::cout << "  OK Partition of unity satisfied\n";
   }
 
   // ===== TEST 3: Non-Negativity Check =====
@@ -3002,7 +2542,7 @@ bool TetMultigridSolver::testProlongationMatrix(
               << minCol << ")\n";
     allTestsPassed = false;
   } else {
-    std::cout << "  ✓ All entries non-negative\n";
+    std::cout << "  OK All entries non-negative\n";
   }
 
   // ===== TEST 4: Constant Preservation =====
@@ -3018,7 +2558,7 @@ bool TetMultigridSolver::testProlongationMatrix(
               << maxConstantError << "\n";
     allTestsPassed = false;
   } else {
-    std::cout << "  ✓ Constant preservation satisfied\n";
+    std::cout << "  OK Constant preservation satisfied\n";
   }
 
   // ===== SUMMARY =====
@@ -3228,7 +2768,7 @@ void TetMultigridSolver::constructProlongationOurs(
   std::vector<int> initial_exterior_priority;
   std::cout << "Building Ours hierarchy...\n";
   std::cout << "  Extracting boundary graph...\n";
-  buildExteriorGraphNEWALT();
+  buildExteriorGraph();
   benchmark.init_exterior_extraction_ms = timer.elapsed();
 
   // Record number of exterior vertices at level 0
@@ -3503,6 +3043,3 @@ void TetMultigridSolver::constructProlongationOurs(
 }
 
 } // namespace GravoMG
-
- 
- 

@@ -39,14 +39,6 @@ PYBIND11_MODULE(gravotet, m) {
             py::arg("output_dir") = "",
             "Build the boundary-aware Ours hierarchy")
         .def(
-            "compute_coarse_operators",
-            &GravoMG::TetMultigridSolver::computeCoarseOperators,
-            py::arg("A_fine"))
-        .def_static(
-            "compute_product_rap",
-            &GravoMG::TetMultigridSolver::computeProductRAP,
-            py::arg("R"), py::arg("A"), py::arg("P"))
-        .def(
             "build_vcycle_hierarchy",
             &GravoMG::TetMultigridSolver::buildVCycleHierarchy,
             py::arg("A_fine"))
@@ -60,15 +52,9 @@ PYBIND11_MODULE(gravotet, m) {
                int post_sweeps,
                double tol,
                double timeout_ms,
-               const std::string& smoother_str,
                double jacobi_omega,
                bool collect_timing,
                const Eigen::VectorXd& mass_diag_inv) {
-                auto smoother = GravoMG::TetMultigridSolver::SmootherType::JACOBI;
-                if (smoother_str == "gauss_seidel" || smoother_str == "gs") {
-                    smoother = GravoMG::TetMultigridSolver::SmootherType::GAUSS_SEIDEL;
-                }
-
                 auto result = solver.solveVCycle(
                     b,
                     x0,
@@ -77,7 +63,6 @@ PYBIND11_MODULE(gravotet, m) {
                     post_sweeps,
                     tol,
                     timeout_ms,
-                    smoother,
                     jacobi_omega,
                     collect_timing,
                     mass_diag_inv);
@@ -110,7 +95,6 @@ PYBIND11_MODULE(gravotet, m) {
             py::arg("post_sweeps") = 2,
             py::arg("tol") = 1e-8,
             py::arg("timeout_ms") = 0.0,
-            py::arg("smoother") = "jacobi",
             py::arg("jacobi_omega") = 0.6667,
             py::arg("collect_timing") = false,
             py::arg("mass_diag_inv") = Eigen::VectorXd())
@@ -131,7 +115,11 @@ PYBIND11_MODULE(gravotet, m) {
         // into all_vertices[j+1].
         .def_readonly("all_tris", &GravoMG::TetMultigridSolver::allTris)
         .def_readonly("all_P", &GravoMG::TetMultigridSolver::allP)
-        .def_readonly("nr_points", &GravoMG::TetMultigridSolver::nr_points);
+        .def_readonly("nr_points", &GravoMG::TetMultigridSolver::nr_points)
+        // all_exterior_indices[j] = global vertex indices of exterior vertices
+        // at level j.  For level 0 these are fine surface vertices; for j>0
+        // these are the coarse vertices that were sampled from the exterior.
+        .def_readonly("all_exterior_indices", &GravoMG::TetMultigridSolver::allExteriorIndices);
 
     m.def("version", []() { return "supplement-0.1.0"; });
 }
