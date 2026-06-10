@@ -1,5 +1,11 @@
 # GravoTet - Supplementary Code
 
+<p align="center">
+  <a href="https://marcelpadilla.com/GravoTet">
+    <img src="https://img.shields.io/badge/Project%20Page-marcelpadilla.com%2FGravoTet-0A66C2?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Project Page">
+  </a>
+</p>
+
 Reference implementation for **GravoTet: A Fast Multigrid Hierarchy
 Construction for Tetrahedral Meshes**, presented at Shape Modeling
 International (SMI) 2026, Istanbul, and published in the _Computers & Graphics_
