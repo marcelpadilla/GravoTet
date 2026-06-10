@@ -1,4 +1,4 @@
-# GravoTet — Supplementary Code
+# GravoTet - Supplementary Code
 
 Reference implementation for **GravoTet: A Fast Multigrid Hierarchy
 Construction for Tetrahedral Meshes**, presented at Shape Modeling
@@ -9,11 +9,25 @@ Marcel Padilla<sup>1</sup>, Ruben Wiersma<sup>1</sup>, Tim Huisman<sup>2</sup>, 
 
 <sub><sup>1</sup> ETH Zürich &nbsp;&middot;&nbsp; <sup>2</sup> Delft University of Technology &nbsp;&middot;&nbsp; correspondence: marcel.padilla@inf.ethz.ch</sub>
 
-GravoTet constructs a multigrid hierarchy on a tetrahedral mesh by coarsening
-the vertex set and forming graph-Voronoi cells whose duals define coarse
-tetrahedra, prioritizing boundary elements to preserve fidelity. Each demo
-builds the hierarchy, solves a Poisson and a biharmonic problem with a V-cycle,
-and writes a figure of the residual curves, timing bars, and hierarchy levels.
+## Abstract
+
+> Geometric multigrid (GMG) methods are a fundamental tool for efficiently
+> solving large sparse linear systems. A requirement for GMG is a hierarchy
+> of grids; however, many practical volumetric domains are available only as
+> single, irregular tetrahedral meshes, making the construction of a multigrid
+> hierarchy necessary. Existing approaches often trade off speed against
+> hierarchy quality: remeshing- or coarsening-based methods can be expensive
+> to construct, whereas graph-based techniques are fast but often yield weaker
+> multigrid performance. We introduce **GravoTet**, which bridges this gap by
+> combining geometric structure with graph-based efficiency to construct fast
+> and effective multigrid hierarchies. GravoTet builds a vertex hierarchy and
+> then generates graph-Voronoi diagrams whose dual cells define coarse
+> tetrahedra, enabling rapid construction of multigrid levels. Boundary
+> elements are explicitly prioritized during both sampling and tet generation
+> to preserve boundary. In our evaluation, we solve Poisson and biharmonic
+> problems on irregular tetrahedral meshes and compare GravoTet against
+> state-of-the-art geometric multigrid, algebraic multigrid and direct
+> solvers, demonstrating superior performance, particularly on large meshes.
 
 ## Clone and run
 
@@ -30,16 +44,16 @@ also accepts `--problems`, `--max-cycles`, and `--verbose`.
 
 ## Results
 
-**Cube — 205k vertices**
+**Cube — 205k vertices** _(seconds)_
 ![Cube 200k](output/cube_200k/output.png)
 
-**Spot — 709k vertices**
+**Spot — 709k vertices** _(~2 min)_
 ![Spot 700k](output/spot_700k/output.png)
 
-**Sphere — 1.45M vertices**
+**Sphere — 1.45M vertices** _(~5 min)_
 ![Sphere 1.5M](output/sphere_1.5M/output.png)
 
-**Torus — 2.01M vertices**
+**Torus — 2.01M vertices** _(~10 min)_
 ![Torus 2M](output/torus_2M/output.png)
 
 Each run also writes per-level meshes and renders, the prolongation matrices,
@@ -58,22 +72,6 @@ On the first run the driver installs any missing Python packages (`numpy`,
 `scipy`, `matplotlib`, `pybind11`, `pyvista`, `pillow`) and builds the local
 C++ extension via `pybind11`. No conda and no SuiteSparse/CHOLMOD are required:
 the V-cycle uses an Eigen `SimplicialLDLT` as its coarse-grid direct solver.
-
-## Where the paper's pieces live
-
-| Paper concept | Source |
-|---|---|
-| Hierarchy construction (sampling, exterior-first clustering, simplicial complex) | `code/cpp/multigrid_solver.cpp` |
-| V-cycle with Chebyshev-accelerated Jacobi smoothing | `code/cpp/multigrid_solver_vcycle.cpp` |
-| Stiffness, lumped mass, and biharmonic assembly | `code/python/gravotet_demo/pde.py` |
-
-## Maintenance
-
-```bash
-python scripts/fetch_data.py    # pre-assemble the large meshes into data/
-python scripts/reset.py         # wipe output/ and build artifacts
-cd code/python && python -m gravotet_demo.test_cube_problems --resolution 10
-```
 
 ## Third-party code and acknowledgments
 
