@@ -23,6 +23,15 @@ output/*
 !output/cube_200k/
 output/cube_200k/*
 !output/cube_200k/output.png
+!output/spot_700k/
+output/spot_700k/*
+!output/spot_700k/output.png
+!output/sphere_1.5M/
+output/sphere_1.5M/*
+!output/sphere_1.5M/output.png
+!output/torus_2M/
+output/torus_2M/*
+!output/torus_2M/output.png
 
 # Assembled input meshes are not committed (GitHub rejects files over 100 MB).
 # They are reassembled from the committed sub-100 MB parts under data_chunks/
