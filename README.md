@@ -1,8 +1,8 @@
 # GravoTet - Supplementary Code
 
 <p align="center">
-  <a href="https://marcelpadilla.com/GravoTet">
-    <img src="https://img.shields.io/badge/Project%20Page-marcelpadilla.com%2FGravoTet-0A66C2?style=for-the-badge" alt="Project Page">
+  <a href="https://marcelpadilla.com/Projects/GravoTet/">
+    <img src="https://img.shields.io/badge/Project%20Page-marcelpadilla.com%2FProjects%2FGravoTet-0A66C2?style=for-the-badge" alt="Project Page">
   </a>
 </p>
 
@@ -38,10 +38,10 @@ Marcel Padilla<sup>1</sup>, Ruben Wiersma<sup>1</sup>, Tim Huisman<sup>2</sup>, 
 ## Clone and run
 
 ```bash
-python run_demo_cube_200k.py     # runs out of the box, finishes in seconds
-python run_demo_spot_700k.py     # ~3 min
-python run_demo_sphere_1.5M.py   # ~7 min
-python run_demo_torus_2M.py      # ~7 min
+python run_demo_cube_200k.py
+python run_demo_spot_700k.py
+python run_demo_sphere_1.5M.py
+python run_demo_torus_2M.py
 ```
 
 The cube is generated in C++ and needs no input. The other three meshes ship in
@@ -50,16 +50,16 @@ also accepts `--problems`, `--max-cycles`, and `--verbose`.
 
 ## Results
 
-**Cube, 205k vertices** _(seconds)_
+**Cube, 205k vertices**
 ![Cube 200k](output/cube_200k/output.png)
 
-**Spot, 709k vertices** _(~3 min)_
+**Spot, 709k vertices**
 ![Spot 700k](output/spot_700k/output.png)
 
-**Sphere, 1.45M vertices** _(~7 min)_
+**Sphere, 1.45M vertices**
 ![Sphere 1.5M](output/sphere_1.5M/output.png)
 
-**Torus, 2.01M vertices** _(~7 min)_
+**Torus, 2.01M vertices**
 ![Torus 2M](output/torus_2M/output.png)
 
 Each run also writes per-level meshes and renders, the prolongation matrices,
