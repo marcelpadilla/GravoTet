@@ -2,7 +2,10 @@
 
 <p align="center">
   <a href="https://marcelpadilla.com/Projects/GravoTet/">
-    <img src="https://img.shields.io/badge/Project%20Page-marcelpadilla.com%2FProjects%2FGravoTet-0A66C2?style=for-the-badge" alt="Project Page">
+    <img src="https://img.shields.io/badge/-Show%20Project%20Page-2563EB?style=for-the-badge" alt="Show Project Page">
+  </a>
+  <a href="https://doi.org/10.1016/j.cag.2026.104662">
+    <img src="https://img.shields.io/badge/-ScienceDirect-FF6C00?style=for-the-badge&logo=sciencedirect&logoColor=white" alt="ScienceDirect">
   </a>
 </p>
 
