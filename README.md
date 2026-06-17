@@ -68,6 +68,9 @@ also accepts `--problems`, `--max-cycles`, and `--verbose`.
 Each run also writes per-level meshes and renders, the prolongation matrices,
 and a `data.json` of metrics under `output/<demo>/`.
 
+_The timings shown in the figures above were measured on an Intel Core
+i9-14900KF CPU with 32 GB of RAM._
+
 ---
 
 ## Requirements and setup
