@@ -18,6 +18,10 @@ Marcel Padilla<sup>1</sup>, Ruben Wiersma<sup>1</sup>, Tim Huisman<sup>2</sup>, 
 
 <sub><sup>1</sup> ETH Zürich &nbsp;&middot;&nbsp; <sup>2</sup> Delft University of Technology &nbsp;&middot;&nbsp; correspondence: marcel.padilla@inf.ethz.ch</sub>
 
+<p align="center">
+  <img src="Representative_image.png" width="120" alt="Representative image">
+</p>
+
 ## Abstract
 
 > Geometric multigrid (GMG) methods are a fundamental tool for efficiently
