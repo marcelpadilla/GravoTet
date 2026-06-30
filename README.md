@@ -85,8 +85,8 @@ i9-14900KF CPU with 32 GB of RAM._
 - around 4 GB of free RAM for the 2M-vertex torus demo
 
 On the first run the driver installs any missing Python packages (`numpy`,
-`scipy`, `matplotlib`, `pybind11`, `pyvista`, `pillow`) and builds the local
-C++ extension via `pybind11`. No conda and no SuiteSparse/CHOLMOD are required:
+`scipy`, `matplotlib`, `pybind11`, `pyvista`, `pillow`, `setuptools`) and builds
+the local C++ extension via `pybind11`. No conda and no SuiteSparse/CHOLMOD are required:
 the V-cycle uses an Eigen `SimplicialLDLT` as its coarse-grid direct solver.
 
 ## Third-party code and acknowledgments

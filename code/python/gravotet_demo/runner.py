@@ -22,52 +22,22 @@ from typing import Any, Callable, Iterable
 
 import numpy as np
 
+from . import _bootstrap
+
 ROOT = Path(__file__).resolve().parents[3]
 CODE = ROOT / "code"
 PKG = CODE / "python" / "gravotet_demo"
 SRC = CODE / "cpp"
 DATA_DIR = ROOT / "data"
 
-MIN_PY, MAX_PY = (3, 8), (3, 13)
-REQUIRED = ("numpy", "scipy", "matplotlib", "pybind11", "pyvista", "PIL")
-
 
 # ---------------------------------------------------------------------------
 # Bootstrap
 # ---------------------------------------------------------------------------
-
-def _ensure_python() -> None:
-    v = sys.version_info[:2]
-    if not (MIN_PY <= v <= MAX_PY):
-        raise SystemExit(
-            f"This demo is tested with Python "
-            f"{MIN_PY[0]}.{MIN_PY[1]}-{MAX_PY[0]}.{MAX_PY[1]} "
-            f"(detected {v[0]}.{v[1]})."
-        )
-
-
-def _ensure_deps() -> None:
-    missing = []
-    for module in REQUIRED:
-        try:
-            importlib.import_module(module)
-        except ImportError:
-            missing.append(module)
-    if not missing:
-        return
-    try:
-        import pip  # noqa: F401
-    except ImportError:
-        print("Bootstrapping pip...")
-        subprocess.check_call([sys.executable, "-m", "ensurepip", "--upgrade"])
-    specs = [
-        line.strip()
-        for line in (PKG / "requirements.txt").read_text().splitlines()
-        if line.strip() and not line.startswith("#")
-    ]
-    print(f"Installing missing Python packages: {', '.join(missing)}")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", *specs])
-
+# The Python-version and third-party-package checks live in the stdlib-only
+# :mod:`_bootstrap` module, which the package __init__ runs before importing
+# any submodule that needs those packages.  The extension build below stays
+# here because it relies on the package already being importable.
 
 def _ext_paths() -> list[Path]:
     return [PKG / f"gravotet{suffix}" for suffix in importlib.machinery.EXTENSION_SUFFIXES]
@@ -112,8 +82,8 @@ def _build_extension() -> None:
 
 def ensure_extension() -> Any:
     """Bootstrap Python deps, (re)build the C++ extension, return the module."""
-    _ensure_python()
-    _ensure_deps()
+    _bootstrap.ensure_python()
+    _bootstrap.ensure_dependencies()
     sys.path.insert(0, str(PKG.parent))   # for gravotet_demo package
     sys.path.insert(0, str(PKG))          # for gravotet C++ extension
     if _needs_rebuild():

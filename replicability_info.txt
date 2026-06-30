@@ -1,0 +1,3 @@
+title: GravoTet: A Fast Multigrid Hierarchy Construction for Tetrahedral Meshes
+authors: Marcel Padilla, Ruben Wiersma, Tim Huisman, Jackson Campolattaro, Olga Sorkine-Hornung, Klaus Hildebrandt
+os: windows, macOS, linux
